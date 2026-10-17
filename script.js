@@ -3,4331 +3,4253 @@
 /* =========================================================
    NAOL MUSIC STUDIO 3D
    Complete browser-based audio editor
+   File: script.js
    ========================================================= */
 
 (() => {
-  /* -------------------------------------------------------
-     HELPERS
-     ------------------------------------------------------- */
+    "use strict";
 
-  const $ = (id) => document.getElementById(id);
+    /* =====================================================
+       1. HELPERS
+       ===================================================== */
 
-  const $$ = (selector, parent = document) =>
-    Array.from(parent.querySelectorAll(selector));
+    const $ = (id) => document.getElementById(id);
 
-  const clamp = (value, min, max) =>
-    Math.min(max, Math.max(min, value));
+    const $$ = (selector, root = document) =>
+        Array.from(root.querySelectorAll(selector));
 
-  const formatTime = (seconds) => {
-    if (!Number.isFinite(seconds) || seconds < 0) {
-      seconds = 0;
-    }
+    const clamp = (value, min, max) =>
+        Math.min(max, Math.max(min, value));
 
-    const minutes = Math.floor(seconds / 60);
-    const remaining = Math.floor(seconds % 60);
+    const formatTime = (seconds) => {
+        if (!Number.isFinite(seconds) || seconds < 0) {
+            seconds = 0;
+        }
 
-    return (
-      String(minutes).padStart(2, "0") +
-      ":" +
-      String(remaining).padStart(2, "0")
-    );
-  };
+        const minutes = Math.floor(seconds / 60);
+        const remaining = Math.floor(seconds % 60);
+        const hundredths = Math.floor((seconds % 1) * 100);
 
-  const safeText = (value) =>
-    String(value ?? "").replace(/[<>]/g, "");
-
-  const hasAudio = (track) =>
-    Boolean(track && track.audio && track.audio.buffer);
-
-  const isMobile = () =>
-    window.matchMedia("(max-width: 760px)").matches;
-
-  /* -------------------------------------------------------
-     DOM STATE
-     ------------------------------------------------------- */
-
-  const state = {
-    initialized: false,
-
-    audioContext: null,
-    masterGain: null,
-    masterAnalyser: null,
-    masterCompressor: null,
-
-    tracks: {
-      music: createTrack("music"),
-      voice: createTrack("voice"),
-      keyboard: createTrack("keyboard")
-    },
-
-    selectedTrack: "music",
-
-    isPlaying: false,
-    playStartedAt: 0,
-    playStartOffset: 0,
-    playbackTimer: null,
-    animationFrame: null,
-
-    playbackSpeed: 1,
-    masterVolume: 0.8,
-
-    currentAudioUrl: null,
-    currentRecordingUrl: null,
-    currentKeyboardUrl: null,
-    currentExportUrl: null,
-
-    mediaRecorder: null,
-    mediaStream: null,
-    recordingChunks: [],
-    recordingStartedAt: 0,
-    recordingElapsedBeforePause: 0,
-    recordingTimer: null,
-    recordingPaused: false,
-
-    keyboardNotes: new Map(),
-    keyboardRecording: [],
-    keyboardRecordingStartedAt: 0,
-    keyboardRecordingPausedAt: 0,
-    keyboardRecordingPauseTotal: 0,
-    keyboardIsRecording: false,
-    keyboardIsPaused: false,
-
-    heldKeyboardNotes: new Map(),
-
-    activePreset: "clean",
-    comparingOriginal: false,
-
-    undoStack: [],
-    redoStack: [],
-
-    toastTimer: null,
-
-    zoom: 1,
-
-    exportBlob: null,
-
-    originalSettings: null,
-
-    projectName: "Naol Music Studio Project"
-  };
-
-  function createTrack(type) {
-    return {
-      type,
-      audio: null,
-      source: null,
-
-      gain: null,
-      pan: null,
-
-      bass: null,
-      mid: null,
-      treble: null,
-
-      distortion: null,
-      distortionWet: null,
-
-      delay: null,
-      delayFeedback: null,
-      delayWet: null,
-
-      reverb: null,
-      reverbWet: null,
-
-      output: null,
-
-      volume: type === "music" ? 0.8 : 0.8,
-      panValue: 0,
-
-      muted: false,
-      solo: false,
-
-      startOffset: 0,
-      trimStart: 0,
-      trimEnd: null,
-
-      startedAt: 0,
-      sourceStartOffset: 0,
-
-      audioElement: null,
-      audioElementSource: null,
-
-      waveform: null,
-      duration: 0,
-
-      name:
-        type === "music"
-          ? "Music Track"
-          : type === "voice"
-            ? "Voice Track"
-            : "Keyboard Track"
+        return (
+            String(minutes).padStart(2, "0") +
+            ":" +
+            String(remaining).padStart(2, "0") +
+            "." +
+            String(hundredths).padStart(2, "0")
+        );
     };
-  }
 
-  /* -------------------------------------------------------
-     TOAST / STATUS
-     ------------------------------------------------------- */
+    const formatBytes = (bytes) => {
+        if (!Number.isFinite(bytes) || bytes <= 0) {
+            return "0 B";
+        }
 
-  function toast(message, duration = 2800) {
-    const element = $("toast");
-
-    if (!element) {
-      console.log("[Naol Music Studio]", message);
-      return;
-    }
-
-    element.textContent = message;
-    element.classList.add("show");
-
-    clearTimeout(state.toastTimer);
-
-    state.toastTimer = setTimeout(() => {
-      element.classList.remove("show");
-    }, duration);
-  }
-
-  function setStatus(id, message) {
-    const element = $(id);
-
-    if (element) {
-      element.textContent = message;
-    }
-  }
-
-  function setSaveStatus(message) {
-    setStatus("saveStatus", message);
-  }
-
-  function setEngineStatus(message) {
-    setStatus("engineStatus", message);
-    setStatus("engineFooterStatus", message);
-  }
-
-  /* -------------------------------------------------------
-     AUDIO CONTEXT
-     ------------------------------------------------------- */
-
-  async function ensureAudioContext() {
-    const AudioContextClass =
-      window.AudioContext ||
-      window.webkitAudioContext;
-
-    if (!AudioContextClass) {
-      throw new Error(
-        "Browseriin kee Web Audio API hin deeggaru."
-      );
-    }
-
-    if (!state.audioContext) {
-      state.audioContext = new AudioContextClass();
-
-      state.masterGain =
-        state.audioContext.createGain();
-
-      state.masterAnalyser =
-        state.audioContext.createAnalyser();
-
-      state.masterAnalyser.fftSize = 2048;
-
-      state.masterCompressor =
-        state.audioContext.createDynamicsCompressor();
-
-      state.masterCompressor.threshold.value = -4;
-      state.masterCompressor.knee.value = 8;
-      state.masterCompressor.ratio.value = 4;
-      state.masterCompressor.attack.value = 0.003;
-      state.masterCompressor.release.value = 0.2;
-
-      state.masterGain.gain.value = state.masterVolume;
-
-      state.masterGain.connect(state.masterCompressor);
-
-      state.masterCompressor.connect(
-        state.masterAnalyser
-      );
-
-      state.masterAnalyser.connect(
-        state.audioContext.destination
-      );
-
-      setEngineStatus("Audio Engine Ready");
-    }
-
-    if (state.audioContext.state === "suspended") {
-      await state.audioContext.resume();
-    }
-
-    return state.audioContext;
-  }
-
-  function createDistortionCurve(amount = 0) {
-    const samples = 44100;
-    const curve = new Float32Array(samples + 1);
-
-    const drive = clamp(amount, 0, 100) / 100;
-
-    for (let i = 0; i <= samples; i++) {
-      const x = (i * 2) / samples - 1;
-
-      curve[i] =
-        drive === 0
-          ? x
-          : Math.tanh(x * (1 + drive * 35)) /
-            Math.tanh(1 + drive * 35);
-    }
-
-    return curve;
-  }
-
-  function createImpulseResponse(
-    context,
-    seconds = 1.3,
-    decay = 2.5
-  ) {
-    const length = Math.max(
-      1,
-      Math.floor(context.sampleRate * seconds)
-    );
-
-    const impulse = context.createBuffer(
-      2,
-      length,
-      context.sampleRate
-    );
-
-    for (let channel = 0; channel < 2; channel++) {
-      const data = impulse.getChannelData(channel);
-
-      for (let i = 0; i < length; i++) {
-        const fade = Math.pow(
-          1 - i / length,
-          decay
+        const units = ["B", "KB", "MB", "GB"];
+        const index = Math.min(
+            units.length - 1,
+            Math.floor(Math.log(bytes) / Math.log(1024))
         );
 
-        data[i] =
-          (Math.random() * 2 - 1) * fade;
-      }
-    }
-
-    return impulse;
-  }
-
-  /* -------------------------------------------------------
-     TRACK AUDIO GRAPH
-     ------------------------------------------------------- */
-
-  async function ensureTrackGraph(track) {
-    const context = await ensureAudioContext();
-
-    if (track.source && track.output) {
-      return track;
-    }
-
-    track.gain = context.createGain();
-
-    track.pan = context.createStereoPanner
-      ? context.createStereoPanner()
-      : null;
-
-    track.bass = context.createBiquadFilter();
-    track.bass.type = "lowshelf";
-    track.bass.frequency.value = 200;
-
-    track.mid = context.createBiquadFilter();
-    track.mid.type = "peaking";
-    track.mid.frequency.value = 1000;
-    track.mid.Q.value = 0.8;
-
-    track.treble = context.createBiquadFilter();
-    track.treble.type = "highshelf";
-    track.treble.frequency.value = 4500;
-
-    track.distortion = context.createWaveShaper();
-    track.distortion.curve = createDistortionCurve(0);
-    track.distortion.oversample = "2x";
-
-    track.distortionWet = context.createGain();
-    track.distortionWet.gain.value = 0;
-
-    track.delay = context.createDelay(2);
-    track.delay.delayTime.value = 0.25;
-
-    track.delayFeedback = context.createGain();
-    track.delayFeedback.gain.value = 0.2;
-
-    track.delayWet = context.createGain();
-    track.delayWet.gain.value = 0;
-
-    track.reverb = context.createConvolver();
-    track.reverb.buffer = createImpulseResponse(context);
-
-    track.reverbWet = context.createGain();
-    track.reverbWet.gain.value = 0;
-
-    track.output = context.createGain();
-
-    /*
-      Main path:
-      source -> EQ -> distortion -> pan -> gain -> output
-
-      Effect sends:
-      EQ -> delay -> feedback
-      EQ -> reverb
-    */
-
-    track.source = context.createGain();
-
-    track.source.connect(track.bass);
-
-    track.bass.connect(track.mid);
-    track.mid.connect(track.treble);
-
-    track.treble.connect(track.distortion);
-
-    track.distortion.connect(track.distortionWet);
-
-    track.distortionWet.connect(track.pan || track.gain);
-
-    if (track.pan) {
-      track.pan.connect(track.gain);
-    }
-
-    track.gain.connect(track.output);
-    track.output.connect(state.masterGain);
-
-    track.treble.connect(track.delay);
-    track.delay.connect(track.delayWet);
-    track.delayWet.connect(track.output);
-
-    track.delay.connect(track.delayFeedback);
-    track.delayFeedback.connect(track.delay);
-
-    track.treble.connect(track.reverb);
-    track.reverb.connect(track.reverbWet);
-    track.reverbWet.connect(track.output);
-
-    applyTrackSettings(track);
-
-    return track;
-  }
-
-  function applyTrackSettings(track) {
-    if (!state.audioContext || !track.gain) {
-      return;
-    }
-
-    const now = state.audioContext.currentTime;
-
-    const volume = clamp(
-      Number(track.volume),
-      0,
-      1.5
-    );
-
-    track.gain.gain.setTargetAtTime(
-      volume,
-      now,
-      0.025
-    );
-
-    if (track.pan) {
-      track.pan.pan.setTargetAtTime(
-        clamp(Number(track.panValue), -1, 1),
-        now,
-        0.025
-      );
-    }
-
-    const musicControls = track.type === "music";
-
-    if (musicControls) {
-      const bassValue = Number(
-        $("bassControl")?.value ?? 0
-      );
-
-      const midValue = Number(
-        $("midControl")?.value ?? 0
-      );
-
-      const trebleValue = Number(
-        $("trebleControl")?.value ?? 0
-      );
-
-      const distortionValue = Number(
-        $("distortionControl")?.value ?? 0
-      );
-
-      const delayValue = Number(
-        $("delayControl")?.value ?? 0
-      );
-
-      const reverbValue = Number(
-        $("reverbControl")?.value ?? 0
-      );
-
-      track.bass.gain.setTargetAtTime(
-        clamp(bassValue, -24, 24),
-        now,
-        0.025
-      );
-
-      track.mid.gain.setTargetAtTime(
-        clamp(midValue, -24, 24),
-        now,
-        0.025
-      );
-
-      track.treble.gain.setTargetAtTime(
-        clamp(trebleValue, -24, 24),
-        now,
-        0.025
-      );
-
-      track.distortion.curve =
-        createDistortionCurve(distortionValue);
-
-      track.distortionWet.gain.setTargetAtTime(
-        clamp(distortionValue / 100, 0, 1),
-        now,
-        0.025
-      );
-
-      track.delayWet.gain.setTargetAtTime(
-        clamp(delayValue / 100, 0, 0.8),
-        now,
-        0.025
-      );
-
-      track.reverbWet.gain.setTargetAtTime(
-        clamp(reverbValue / 100, 0, 0.8),
-        now,
-        0.025
-      );
-
-      track.delay.delayTime.setTargetAtTime(
-        0.15 + delayValue * 0.004,
-        now,
-        0.025
-      );
-    }
-
-    updateMixerMeters();
-  }
-
-  function applyAllTrackSettings() {
-    Object.values(state.tracks).forEach((track) => {
-      applyTrackSettings(track);
-    });
-  }
-
-  function getEffectiveVolume(track) {
-    const anySolo = Object.values(state.tracks).some(
-      (item) => item.solo
-    );
-
-    if (track.muted) {
-      return 0;
-    }
-
-    if (anySolo && !track.solo) {
-      return 0;
-    }
-
-    return clamp(track.volume, 0, 1.5);
-  }
-
-  function updateTrackMuteSoloGains() {
-    Object.values(state.tracks).forEach((track) => {
-      if (!track.gain || !state.audioContext) {
-        return;
-      }
-
-      const target = getEffectiveVolume(track);
-
-      track.gain.gain.setTargetAtTime(
-        target,
-        state.audioContext.currentTime,
-        0.025
-      );
-    });
-
-    updateTrackActionButtons();
-  }
-
-  /* -------------------------------------------------------
-     AUDIO FILE IMPORT
-     ------------------------------------------------------- */
-
-  async function decodeAudioFile(file) {
-    await ensureAudioContext();
-
-    const arrayBuffer = await file.arrayBuffer();
-
-    return await state.audioContext.decodeAudioData(
-      arrayBuffer.slice(0)
-    );
-  }
-
-  async function importAudioFile(file, targetType) {
-    if (!file) return;
-
-    if (
-      !file.type.startsWith("audio/") &&
-      !/\.(wav|mp3|m4a|aac|ogg|oga|opus|flac|webm)$/i.test(
-        file.name
-      )
-    ) {
-      toast("Faayila audio filadhu.");
-      return;
-    }
-
-    const type =
-      targetType ||
-      state.selectedTrack ||
-      "music";
-
-    const track = state.tracks[type];
-
-    if (!track) {
-      toast("Track sirrii filadhu.");
-      return;
-    }
-
-    try {
-      toast("Audio fe'amaa jira...");
-
-      const buffer = await decodeAudioFile(file);
-
-      stopPlayback();
-
-      track.audio = {
-        buffer,
-        originalFile: file
-      };
-
-      track.duration = buffer.duration;
-      track.trimStart = 0;
-      track.trimEnd = buffer.duration;
-      track.startOffset = 0;
-      track.name = file.name;
-
-      track.waveform = generateWaveformData(buffer);
-
-      await ensureTrackGraph(track);
-
-      drawTrackWaveform(type);
-
-      updateAudioInformation();
-      updateTimeline();
-      updateMixerMeters();
-
-      saveUndoState();
-
-      setSaveStatus("Audio loaded");
-
-      toast(
-        "Audio milkaa'inaan fe'ame: " + file.name
-      );
-
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        "Audio fe'uun hin dandeenye. Faayila biraa yaali."
-      );
-    }
-  }
-
-  function generateWaveformData(buffer, points = 500) {
-    const channel = buffer.getChannelData(0);
-    const result = [];
-
-    const step = Math.max(
-      1,
-      Math.floor(channel.length / points)
-    );
-
-    for (let i = 0; i < channel.length; i += step) {
-      let max = 0;
-
-      const end = Math.min(
-        channel.length,
-        i + step
-      );
-
-      for (let j = i; j < end; j++) {
-        max = Math.max(max, Math.abs(channel[j]));
-      }
-
-      result.push(max);
-    }
-
-    return result;
-  }
-
-  /* -------------------------------------------------------
-     AUDIO INFORMATION
-     ------------------------------------------------------- */
-
-  function getSelectedTrack() {
-    return state.tracks[state.selectedTrack];
-  }
-
-  function getTrackDuration(track) {
-    if (!track) return 0;
-
-    if (track.trimEnd !== null) {
-      return Math.max(
-        0,
-        track.trimEnd - track.trimStart
-      );
-    }
-
-    return track.duration || 0;
-  }
-
-  function getProjectDuration() {
-    return Math.max(
-      0,
-      ...Object.values(state.tracks).map((track) =>
-        getTrackDuration(track)
-      )
-    );
-  }
-
-  function updateAudioInformation() {
-    const track = getSelectedTrack();
-    const available = hasAudio(track);
-
-    setStatus(
-      "currentTrackTitle",
-      available ? track.name : "No audio selected"
-    );
-
-    setStatus(
-      "audioFormat",
-      available
-        ? track.audio.buffer.numberOfChannels + " CH"
-        : "No audio"
-    );
-
-    setStatus(
-      "trackDurationText",
-      formatTime(available ? getTrackDuration(track) : 0)
-    );
-
-    setStatus(
-      "durationDisplay",
-      formatTime(getProjectDuration())
-    );
-
-    setStatus(
-      "audioStatus",
-      available ? "Audio loaded" : "Waiting for audio"
-    );
-
-    setStatus(
-      "playbackBadge",
-      available ? "READY TO PLAY" : "NO AUDIO"
-    );
-
-    const selectedName = $("timelineTrackName");
-
-    if (selectedName) {
-      selectedName.textContent = track.name;
-    }
-
-    const waveformPlaceholder = $("emptyWaveform");
-
-    if (waveformPlaceholder) {
-      waveformPlaceholder.style.display =
-        available ? "none" : "block";
-    }
-  }
-
-  /* -------------------------------------------------------
-     TIMELINE / CLIPS
-     ------------------------------------------------------- */
-
-  function updateTimeline() {
-    const totalDuration = Math.max(
-      1,
-      getProjectDuration()
-    );
-
-    const trackIds = {
-      music: "mainAudioClip",
-      voice: "voiceAudioClip",
-      keyboard: "keyboardAudioClip"
+        return (
+            (bytes / Math.pow(1024, index)).toFixed(2) +
+            " " +
+            units[index]
+        );
     };
 
-    Object.entries(trackIds).forEach(([type, id]) => {
-      const clip = $(id);
-      const track = state.tracks[type];
+    const midiToFrequency = (midi) =>
+        440 * Math.pow(2, (midi - 69) / 12);
 
-      if (!clip) return;
+    const safeText = (element, text) => {
+        if (element) {
+            element.textContent = String(text);
+        }
+    };
 
-      const available = hasAudio(track);
+    const downloadBlob = (blob, filename) => {
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
 
-      clip.style.display = available ? "flex" : "none";
+        anchor.href = url;
+        anchor.download = filename;
 
-      if (available) {
-        const clipDuration = getTrackDuration(track);
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
 
-        clip.title = track.name;
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+    };
 
-        const name = clip.querySelector(
-          ".clip-name, strong"
+    const showToast = (message, duration = 3000) => {
+        const toast = $("toast");
+
+        if (toast) {
+            toast.textContent = message;
+            toast.classList.add("show");
+            toast.setAttribute("aria-live", "polite");
+
+            clearTimeout(showToast.timer);
+
+            showToast.timer = setTimeout(() => {
+                toast.classList.remove("show");
+            }, duration);
+        } else {
+            console.info("[Naol Music Studio]", message);
+        }
+    };
+
+    const setStatus = (message) => {
+        safeText($("engineStatus"), message);
+        safeText($("engineFooterStatus"), message);
+        safeText($("audioStatus"), message);
+    };
+
+    const setButtonEnabled = (id, enabled) => {
+        const element = $(id);
+
+        if (element) {
+            element.disabled = !enabled;
+        }
+    };
+
+    const readNumber = (id, fallback = 0) => {
+        const element = $(id);
+
+        if (!element) {
+            return fallback;
+        }
+
+        const value = Number(element.value);
+
+        return Number.isFinite(value) ? value : fallback;
+    };
+
+    const getAudioContextClass = () =>
+        window.AudioContext || window.webkitAudioContext;
+
+    /* =====================================================
+       2. APPLICATION STATE
+       ===================================================== */
+
+    const state = {
+        audioContext: null,
+        masterGain: null,
+        masterAnalyser: null,
+        masterMuteGain: null,
+
+        tracks: [],
+        activeTrackId: null,
+        nextTrackId: 1,
+
+        playing: false,
+        playStartContextTime: 0,
+        playStartOffset: 0,
+        playTimer: null,
+        animationFrame: null,
+
+        masterMuted: false,
+        soloTrackId: null,
+
+        zoom: 1,
+        undoStack: [],
+        redoStack: [],
+
+        mediaRecorder: null,
+        mediaStream: null,
+        recordingChunks: [],
+        recordingBlob: null,
+        recordingUrl: null,
+        recordingStartedAt: 0,
+        recordingElapsedBeforePause: 0,
+        recordingTimer: null,
+        recordingPaused: false,
+
+        keyboardRecordingEvents: [],
+        keyboardRecordingStart: 0,
+        keyboardRecordingPausedAt: 0,
+        keyboardRecordingPauseTotal: 0,
+        keyboardRecording: false,
+        keyboardPaused: false,
+        keyboardTimer: null,
+
+        keyboardActiveNotes: new Map(),
+        keyboardAudioBuffer: null,
+
+        currentPreviewBuffer: null,
+        currentPreviewSource: null,
+
+        effectNodes: new Map(),
+        sourceNodes: new Map(),
+
+        exportBlob: null,
+        exportUrl: null,
+
+        comparing: false,
+        beforeCompare: null,
+
+        lastAnalysis: null,
+        projectName: "Naol Music Studio 3D"
+    };
+
+    /* =====================================================
+       3. AUDIO ENGINE
+       ===================================================== */
+
+    function ensureAudioContext() {
+        const AudioContextClass = getAudioContextClass();
+
+        if (!AudioContextClass) {
+            showToast(
+                "Browser kana Web Audio API hin deeggaru.",
+                5000
+            );
+
+            return null;
+        }
+
+        if (!state.audioContext) {
+            state.audioContext = new AudioContextClass();
+
+            state.masterGain =
+                state.audioContext.createGain();
+
+            state.masterMuteGain =
+                state.audioContext.createGain();
+
+            state.masterAnalyser =
+                state.audioContext.createAnalyser();
+
+            state.masterAnalyser.fftSize = 2048;
+
+            state.masterGain.gain.value = 1;
+            state.masterMuteGain.gain.value = 1;
+
+            state.masterGain.connect(state.masterMuteGain);
+            state.masterMuteGain.connect(
+                state.masterAnalyser
+            );
+
+            state.masterAnalyser.connect(
+                state.audioContext.destination
+            );
+
+            updateMasterVolume();
+            updateMasterMeter();
+        }
+
+        if (state.audioContext.state === "suspended") {
+            state.audioContext.resume().catch((error) => {
+                console.error("Audio resume failed:", error);
+            });
+        }
+
+        return state.audioContext;
+    }
+
+    function makeTrackNodes(track) {
+        const context = ensureAudioContext();
+
+        if (!context || track.nodes) {
+            return;
+        }
+
+        const input = context.createGain();
+        const highpass = context.createBiquadFilter();
+        const bass = context.createBiquadFilter();
+        const mid = context.createBiquadFilter();
+        const treble = context.createBiquadFilter();
+        const distortion = context.createWaveShaper();
+        const delay = context.createDelay(2);
+        const delayFeedback = context.createGain();
+        const delayWet = context.createGain();
+        const reverb = context.createConvolver();
+        const reverbWet = context.createGain();
+        const dry = context.createGain();
+        const pan = context.createStereoPanner();
+        const volume = context.createGain();
+        const analyser = context.createAnalyser();
+
+        highpass.type = "highpass";
+        highpass.frequency.value = 20;
+
+        bass.type = "lowshelf";
+        bass.frequency.value = 180;
+
+        mid.type = "peaking";
+        mid.frequency.value = 1000;
+        mid.Q.value = 0.8;
+
+        treble.type = "highshelf";
+        treble.frequency.value = 5000;
+
+        distortion.oversample = "4x";
+
+        delay.delayTime.value = 0.18;
+        delayFeedback.gain.value = 0.15;
+        delayWet.gain.value = 0;
+
+        reverbWet.gain.value = 0;
+        dry.gain.value = 1;
+
+        pan.pan.value = 0;
+        volume.gain.value = track.volume;
+
+        analyser.fftSize = 1024;
+
+        const reverbLength = Math.floor(
+            context.sampleRate * 1.5
         );
 
-        if (name) {
-          name.textContent = track.name;
+        const impulse = context.createBuffer(
+            2,
+            reverbLength,
+            context.sampleRate
+        );
+
+        for (let channel = 0; channel < 2; channel++) {
+            const data = impulse.getChannelData(channel);
+
+            for (let i = 0; i < reverbLength; i++) {
+                const decay = Math.pow(
+                    1 - i / reverbLength,
+                    2.4
+                );
+
+                data[i] =
+                    (Math.random() * 2 - 1) * decay;
+            }
         }
 
-        const widthPercent =
-          (clipDuration / totalDuration) * 100;
+        reverb.buffer = impulse;
 
-        clip.style.width =
-          clamp(widthPercent, 10, 100) + "%";
-      }
-    });
+        input.connect(highpass);
+        highpass.connect(bass);
+        bass.connect(mid);
+        mid.connect(treble);
+        treble.connect(distortion);
 
-    const content = $("timelineContent");
+        distortion.connect(dry);
+        dry.connect(volume);
 
-    if (content) {
-      content.style.minWidth =
-        Math.max(680, 680 * state.zoom) + "px";
+        distortion.connect(delay);
+        delay.connect(delayFeedback);
+        delayFeedback.connect(delay);
+        delay.connect(delayWet);
+        delayWet.connect(volume);
+
+        distortion.connect(reverb);
+        reverb.connect(reverbWet);
+        reverbWet.connect(volume);
+
+        volume.connect(pan);
+        pan.connect(analyser);
+
+        track.nodes = {
+            input,
+            highpass,
+            bass,
+            mid,
+            treble,
+            distortion,
+            delay,
+            delayFeedback,
+            delayWet,
+            reverb,
+            reverbWet,
+            dry,
+            pan,
+            volume,
+            analyser
+        };
+
+        applyTrackEffects(track);
     }
 
-    const zoomValue = $("zoomValue");
-
-    if (zoomValue) {
-      zoomValue.textContent =
-        Math.round(state.zoom * 100) + "%";
-    }
-
-    updateAudioInformation();
-  }
-
-  function drawTrackWaveform(type) {
-    const track = state.tracks[type];
-
-    const canvas =
-      type === "music"
-        ? $("waveformCanvas")
-        : document.querySelector(
-            `[data-track-type="${type}"] canvas`
-          );
-
-    if (!canvas || !track.waveform) return;
-
-    const rect = canvas.getBoundingClientRect();
-
-    const width = Math.max(
-      300,
-      Math.floor(rect.width || 600)
-    );
-
-    const height = Math.max(
-      24,
-      Math.floor(rect.height || 30)
-    );
-
-    const dpr = Math.min(
-      2,
-      window.devicePixelRatio || 1
-    );
-
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-
-    const ctx = canvas.getContext("2d");
-
-    if (!ctx) return;
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, width, height);
-
-    const color =
-      type === "music"
-        ? "#9a8cff"
-        : type === "voice"
-          ? "#43d9ff"
-          : "#45e6a0";
-
-    ctx.fillStyle = color;
-
-    const data = track.waveform;
-    const barWidth = width / data.length;
-
-    data.forEach((value, index) => {
-      const barHeight = Math.max(
-        1,
-        value * height * 0.92
-      );
-
-      ctx.fillRect(
-        index * barWidth,
-        (height - barHeight) / 2,
-        Math.max(1, barWidth * 0.7),
-        barHeight
-      );
-    });
-  }
-
-  function drawAllWaveforms() {
-    Object.keys(state.tracks).forEach(
-      drawTrackWaveform
-    );
-  }
-
-  function updatePlayhead(time) {
-    const playhead = $("playhead");
-
-    if (!playhead) return;
-
-    const duration = Math.max(
-      1,
-      getProjectDuration()
-    );
-
-    const timeline =
-      $("timelineContent")?.getBoundingClientRect();
-
-    if (!timeline) return;
-
-    const leftOffset = 145;
-
-    const usableWidth = Math.max(
-      1,
-      timeline.width - leftOffset
-    );
-
-    playhead.style.left =
-      leftOffset +
-      (clamp(time / duration, 0, 1) * usableWidth) +
-      "px";
-  }
-
-  /* -------------------------------------------------------
-     PLAYBACK
-     ------------------------------------------------------- */
-
-  function getPlaybackTime() {
-    if (!state.isPlaying) {
-      return state.playStartOffset;
-    }
-
-    return (
-      state.playStartOffset +
-      (performance.now() - state.playStartedAt) /
-        1000 *
-        state.playbackSpeed
-    );
-  }
-
-  async function playTrack(track, projectTime) {
-    if (!hasAudio(track)) return;
-
-    const context = await ensureAudioContext();
-
-    await ensureTrackGraph(track);
-
-    const source = context.createBufferSource();
-
-    source.buffer = track.audio.buffer;
-    source.playbackRate.value = state.playbackSpeed;
-
-    source.connect(track.source);
-
-    const offset = clamp(
-      track.trimStart + projectTime,
-      track.trimStart,
-      track.trimEnd ?? track.duration
-    );
-
-    const end = track.trimEnd ?? track.duration;
-    const remaining = Math.max(0, end - offset);
-
-    if (remaining <= 0) return;
-
-    track.sourceStartOffset = offset;
-    track.startedAt = context.currentTime;
-
-    const trackGain = track.source;
-
-    trackGain.gain.cancelScheduledValues(
-      context.currentTime
-    );
-
-    trackGain.gain.setValueAtTime(
-      1,
-      context.currentTime
-    );
-
-    const fadeIn = Number(
-      $("fadeInControl")?.value ?? 0
-    );
-
-    const fadeOut = Number(
-      $("fadeOutControl")?.value ?? 0
-    );
-
-    if (fadeIn > 0) {
-      const fadeSeconds = Math.min(
-        fadeIn,
-        remaining
-      );
-
-      trackGain.gain.setValueAtTime(
-        0,
-        context.currentTime
-      );
-
-      trackGain.gain.linearRampToValueAtTime(
-        1,
-        context.currentTime + fadeSeconds
-      );
-    }
-
-    if (fadeOut > 0) {
-      const fadeStart = Math.max(
-        0,
-        remaining - fadeOut
-      );
-
-      trackGain.gain.setValueAtTime(
-        1,
-        context.currentTime + fadeStart
-      );
-
-      trackGain.gain.linearRampToValueAtTime(
-        0,
-        context.currentTime + remaining
-      );
-    }
-
-    source.start(
-      0,
-      offset,
-      Math.min(remaining, track.duration - offset)
-    );
-
-    track.audioElement = source;
-
-    source.onended = () => {
-      if (track.audioElement === source) {
-        track.audioElement = null;
-      }
-    };
-  }
-
-  async function startPlayback() {
-    const projectDuration = getProjectDuration();
-
-    if (projectDuration <= 0) {
-      toast("Jalqaba audio upload godhi.");
-      return;
-    }
-
-    try {
-      await ensureAudioContext();
-
-      stopPlayback(false);
-
-      const startAt = clamp(
-        state.playStartOffset,
-        0,
-        projectDuration
-      );
-
-      if (startAt >= projectDuration) {
-        state.playStartOffset = 0;
-      }
-
-      state.isPlaying = true;
-      state.playStartedAt = performance.now();
-
-      Object.values(state.tracks).forEach((track) => {
-        if (!hasAudio(track)) return;
-
-        playTrack(track, state.playStartOffset)
-          .catch((error) => {
-            console.error("Track playback error:", error);
-          });
-      });
-
-      updatePlaybackButtons();
-      startPlaybackAnimation();
-
-      setStatus("playbackBadge", "PLAYING");
-      toast("Playback started");
-
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        "Audio playback jalqabuun hin danda'amne."
-      );
-    }
-  }
-
-  function pausePlayback() {
-    if (!state.isPlaying) return;
-
-    state.playStartOffset = getPlaybackTime();
-
-    stopPlaybackSources();
-
-    state.isPlaying = false;
-
-    cancelAnimationFrame(state.animationFrame);
-
-    updatePlaybackButtons();
-    setStatus("playbackBadge", "PAUSED");
-  }
-
-  function stopPlaybackSources() {
-    Object.values(state.tracks).forEach((track) => {
-      const source = track.audioElement;
-
-      if (source && typeof source.stop === "function") {
-        try {
-          source.stop();
-        } catch (_) {
-          // Source may already have stopped.
-        }
-      }
-
-      track.audioElement = null;
-    });
-  }
-
-  function stopPlayback(resetTime = true) {
-    stopPlaybackSources();
-
-    state.isPlaying = false;
-
-    if (resetTime) {
-      state.playStartOffset = 0;
-    }
-
-    cancelAnimationFrame(state.animationFrame);
-
-    updatePlaybackButtons();
-
-    if (resetTime) {
-      setStatus("timeDisplay", "00:00");
-      updatePlayhead(0);
-    }
-
-    setStatus("playbackBadge", "STOPPED");
-  }
-
-  function togglePlayback() {
-    if (state.isPlaying) {
-      pausePlayback();
-    } else {
-      startPlayback();
-    }
-  }
-
-  function startPlaybackAnimation() {
-    cancelAnimationFrame(state.animationFrame);
-
-    const frame = () => {
-      if (!state.isPlaying) return;
-
-      const time = getPlaybackTime();
-
-      const duration = getProjectDuration();
-
-      setStatus("timeDisplay", formatTime(time));
-
-      const seekBar = $("seekBar");
-
-      if (seekBar) {
-        seekBar.max = duration || 1;
-        seekBar.value = clamp(time, 0, duration);
-      }
-
-      updatePlayhead(time);
-      drawVisualizer();
-      drawAudioMeter();
-
-      if (time >= duration) {
-        stopPlayback();
-        return;
-      }
-
-      state.animationFrame =
-        requestAnimationFrame(frame);
-    };
-
-    state.animationFrame =
-      requestAnimationFrame(frame);
-  }
-
-  function updatePlaybackButtons() {
-    const playButton = $("playBtn");
-
-    if (playButton) {
-      playButton.textContent =
-        state.isPlaying ? "Ⅱ" : "▶";
-
-      playButton.setAttribute(
-        "aria-label",
-        state.isPlaying ? "Pause playback" : "Play audio"
-      );
-    }
-
-    const playBadge = $("playbackBadge");
-
-    if (playBadge && state.isPlaying) {
-      playBadge.textContent = "PLAYING";
-    }
-  }
-
-  function seekPlayback(value) {
-    const duration = getProjectDuration();
-
-    const target = clamp(
-      Number(value) || 0,
-      0,
-      duration
-    );
-
-    state.playStartOffset = target;
-
-    setStatus("timeDisplay", formatTime(target));
-    updatePlayhead(target);
-
-    if (state.isPlaying) {
-      startPlayback();
-    }
-  }
-
-  /* -------------------------------------------------------
-     AUDIO EFFECT CONTROLS
-     ------------------------------------------------------- */
-
-  function updateRangeLabel(inputId, labelId, suffix = "") {
-    const input = $(inputId);
-    const label = $(labelId);
-
-    if (!input || !label) return;
-
-    label.textContent = input.value + suffix;
-  }
-
-  function bindRange(
-    inputId,
-    labelId,
-    callback,
-    suffix = ""
-  ) {
-    const input = $(inputId);
-
-    if (!input) return;
-
-    const update = () => {
-      updateRangeLabel(inputId, labelId, suffix);
-
-      if (callback) {
-        callback(Number(input.value));
-      }
-    };
-
-    input.addEventListener("input", update);
-    input.addEventListener("change", update);
-
-    update();
-  }
-
-  function bindEffectControls() {
-    bindRange(
-      "volumeControl",
-      "volumeValue",
-      (value) => {
-        const track = state.tracks.music;
-
-        track.volume = clamp(value / 100, 0, 1.5);
-
-        applyTrackSettings(track);
-        updateTrackMuteSoloGains();
-      },
-      "%"
-    );
-
-    bindRange(
-      "bassControl",
-      "bassValue",
-      () => applyTrackSettings(state.tracks.music),
-      " dB"
-    );
-
-    bindRange(
-      "midControl",
-      "midValue",
-      () => applyTrackSettings(state.tracks.music),
-      " dB"
-    );
-
-    bindRange(
-      "trebleControl",
-      "trebleValue",
-      () => applyTrackSettings(state.tracks.music),
-      " dB"
-    );
-
-    bindRange(
-      "panControl",
-      "panValue",
-      (value) => {
-        state.tracks.music.panValue = value / 100;
-
-        applyTrackSettings(state.tracks.music);
-      },
-      ""
-    );
-
-    bindRange(
-      "reverbControl",
-      "reverbValue",
-      () => applyTrackSettings(state.tracks.music),
-      "%"
-    );
-
-    bindRange(
-      "delayControl",
-      "delayValue",
-      () => applyTrackSettings(state.tracks.music),
-      "%"
-    );
-
-    bindRange(
-      "distortionControl",
-      "distortionValue",
-      () => applyTrackSettings(state.tracks.music),
-      "%"
-    );
-
-    bindRange(
-      "fadeInControl",
-      "fadeInValue",
-      null,
-      " s"
-    );
-
-    bindRange(
-      "fadeOutControl",
-      "fadeOutValue",
-      null,
-      " s"
-    );
-
-    bindRange(
-      "mixerVolume",
-      "masterLevelText",
-      (value) => {
-        state.masterVolume = value / 100;
-
-        if (state.masterGain && state.audioContext) {
-          state.masterGain.gain.setTargetAtTime(
-            state.masterVolume,
-            state.audioContext.currentTime,
-            0.025
-          );
+    function makeDistortionCurve(amount) {
+        const samples = 44100;
+        const curve = new Float32Array(samples);
+        const k = Math.max(0, amount) * 8;
+
+        if (k === 0) {
+            for (let i = 0; i < samples; i++) {
+                curve[i] = (i * 2) / samples - 1;
+            }
+
+            return curve;
         }
 
-        updateMixerMeters();
-      },
-      "%"
-    );
+        for (let i = 0; i < samples; i++) {
+            const x = (i * 2) / samples - 1;
 
-    bindRange(
-      "mixerTrackVolume",
-      null,
-      (value) => {
-        state.tracks.music.volume =
-          clamp(value / 100, 0, 1.5);
+            curve[i] =
+                ((3 + k) * x * 20 * Math.PI / 180) /
+                (Math.PI + k * Math.abs(x));
+        }
 
-        applyTrackSettings(state.tracks.music);
-        updateTrackMuteSoloGains();
-      }
-    );
-
-    bindRange(
-      "mixerPan",
-      null,
-      (value) => {
-        state.tracks.music.panValue = value / 100;
-
-        applyTrackSettings(state.tracks.music);
-      }
-    );
-
-    bindRange(
-      "voiceVolume",
-      null,
-      (value) => {
-        state.tracks.voice.volume =
-          clamp(value / 100, 0, 1.5);
-
-        applyTrackSettings(state.tracks.voice);
-        updateTrackMuteSoloGains();
-      }
-    );
-
-    bindRange(
-      "voicePan",
-      null,
-      (value) => {
-        state.tracks.voice.panValue = value / 100;
-
-        applyTrackSettings(state.tracks.voice);
-      }
-    );
-
-    bindRange(
-      "instrumentMixerVolume",
-      null,
-      (value) => {
-        state.tracks.keyboard.volume =
-          clamp(value / 100, 0, 1.5);
-
-        applyTrackSettings(state.tracks.keyboard);
-        updateTrackMuteSoloGains();
-      }
-    );
-
-    bindRange(
-      "instrumentMixerPan",
-      null,
-      (value) => {
-        state.tracks.keyboard.panValue =
-          value / 100;
-
-        applyTrackSettings(state.tracks.keyboard);
-      }
-    );
-
-    bindRange(
-      "keyboardVolume",
-      null,
-      (value) => {
-        state.tracks.keyboard.volume =
-          clamp(value / 100, 0, 1.5);
-
-        applyTrackSettings(state.tracks.keyboard);
-        updateTrackMuteSoloGains();
-      }
-    );
-  }
-
-  /* -------------------------------------------------------
-     PRESETS
-     ------------------------------------------------------- */
-
-  const presets = {
-    clean: {
-      bass: 0,
-      mid: 0,
-      treble: 0,
-      reverb: 0,
-      delay: 0,
-      distortion: 0
-    },
-
-    warm: {
-      bass: 4,
-      mid: -1,
-      treble: -2,
-      reverb: 12,
-      delay: 0,
-      distortion: 2
-    },
-
-    bright: {
-      bass: -2,
-      mid: 1,
-      treble: 5,
-      reverb: 8,
-      delay: 0,
-      distortion: 0
-    },
-
-    rap: {
-      bass: 5,
-      mid: 2,
-      treble: 3,
-      reverb: 4,
-      delay: 8,
-      distortion: 3
-    },
-
-    gospel: {
-      bass: 2,
-      mid: 1,
-      treble: 3,
-      reverb: 35,
-      delay: 12,
-      distortion: 0
-    },
-
-    studio: {
-      bass: 1,
-      mid: 1,
-      treble: 2,
-      reverb: 10,
-      delay: 2,
-      distortion: 0
-    }
-  };
-
-  function applyPreset(name) {
-    const preset = presets[name];
-
-    if (!preset) return;
-
-    const values = {
-      bassControl: preset.bass,
-      midControl: preset.mid,
-      trebleControl: preset.treble,
-      reverbControl: preset.reverb,
-      delayControl: preset.delay,
-      distortionControl: preset.distortion
-    };
-
-    Object.entries(values).forEach(([id, value]) => {
-      const input = $(id);
-
-      if (!input) return;
-
-      input.value = value;
-      input.dispatchEvent(
-        new Event("input", { bubbles: true })
-      );
-    });
-
-    state.activePreset = name;
-
-    $$(".preset-button").forEach((button) => {
-      button.classList.toggle(
-        "active",
-        button.dataset.preset === name
-      );
-    });
-
-    setStatus(
-      "presetStatus",
-      "Preset applied: " + name
-    );
-
-    toast("Preset " + name + " applied");
-
-    saveUndoState();
-  }
-
-  /* -------------------------------------------------------
-     RESET / COMPARE
-     ------------------------------------------------------- */
-
-  function resetAdjustments() {
-    const defaults = {
-      volumeControl: 80,
-      bassControl: 0,
-      midControl: 0,
-      trebleControl: 0,
-      panControl: 0,
-      reverbControl: 0,
-      delayControl: 0,
-      distortionControl: 0,
-      fadeInControl: 0,
-      fadeOutControl: 0
-    };
-
-    Object.entries(defaults).forEach(([id, value]) => {
-      const input = $(id);
-
-      if (!input) return;
-
-      input.value = value;
-
-      input.dispatchEvent(
-        new Event("input", { bubbles: true })
-      );
-    });
-
-    state.tracks.music.volume = 0.8;
-    state.tracks.music.panValue = 0;
-
-    applyTrackSettings(state.tracks.music);
-
-    toast("Audio adjustments reset");
-  }
-
-  function toggleCompare() {
-    state.comparingOriginal =
-      !state.comparingOriginal;
-
-    const button = $("compareBtn");
-
-    if (button) {
-      button.textContent =
-        state.comparingOriginal
-          ? "Return to Effects"
-          : "Compare Original";
+        return curve;
     }
 
-    if (state.comparingOriginal) {
-      setStatus(
-        "compareStatus",
-        "Original comparison active"
-      );
+    function applyTrackEffects(track) {
+        if (!track || !track.nodes || !state.audioContext) {
+            return;
+        }
 
-      const track = state.tracks.music;
-
-      if (track.bass && state.audioContext) {
+        const nodes = track.nodes;
         const now = state.audioContext.currentTime;
 
-        track.bass.gain.setTargetAtTime(0, now, 0.02);
-        track.mid.gain.setTargetAtTime(0, now, 0.02);
-        track.treble.gain.setTargetAtTime(0, now, 0.02);
-
-        track.distortionWet.gain.setTargetAtTime(
-          0,
-          now,
-          0.02
+        nodes.volume.gain.setTargetAtTime(
+            track.muted ? 0 : track.volume,
+            now,
+            0.015
         );
 
-        track.delayWet.gain.setTargetAtTime(
-          0,
-          now,
-          0.02
+        nodes.pan.pan.setTargetAtTime(
+            clamp(track.pan, -1, 1),
+            now,
+            0.015
         );
 
-        track.reverbWet.gain.setTargetAtTime(
-          0,
-          now,
-          0.02
+        nodes.bass.gain.setTargetAtTime(
+            track.bass,
+            now,
+            0.015
         );
-      }
-    } else {
-      applyTrackSettings(state.tracks.music);
 
-      setStatus(
-        "compareStatus",
-        "Effects restored"
-      );
-    }
-  }
+        nodes.mid.gain.setTargetAtTime(
+            track.mid,
+            now,
+            0.015
+        );
 
-  /* -------------------------------------------------------
-     TRACK MUTE / SOLO
-     ------------------------------------------------------- */
+        nodes.treble.gain.setTargetAtTime(
+            track.treble,
+            now,
+            0.015
+        );
 
-  function updateTrackActionButtons() {
-    $$("[data-track-action]").forEach((button) => {
-      const type = button.dataset.track;
-      const action = button.dataset.trackAction;
-      const track = state.tracks[type];
+        nodes.delayWet.gain.setTargetAtTime(
+            track.delay / 100 * 0.5,
+            now,
+            0.015
+        );
 
-      if (!track) return;
+        nodes.delayFeedback.gain.setTargetAtTime(
+            clamp(track.delay / 100 * 0.65, 0, 0.65),
+            now,
+            0.015
+        );
 
-      const active =
-        action === "mute"
-          ? track.muted
-          : action === "solo"
-            ? track.solo
-            : false;
+        nodes.reverbWet.gain.setTargetAtTime(
+            track.reverb / 100 * 0.65,
+            now,
+            0.015
+        );
 
-      button.classList.toggle("active", active);
-      button.setAttribute(
-        "aria-pressed",
-        active ? "true" : "false"
-      );
-    });
-  }
+        nodes.dry.gain.setTargetAtTime(
+            1 - track.distortion / 250,
+            now,
+            0.015
+        );
 
-  function toggleTrackAction(type, action) {
-    const track = state.tracks[type];
+        nodes.distortion.curve = makeDistortionCurve(
+            track.distortion
+        );
 
-    if (!track) return;
+        const shouldSolo =
+            state.soloTrackId !== null &&
+            state.soloTrackId !== track.id;
 
-    if (action === "mute") {
-      track.muted = !track.muted;
-    } else if (action === "solo") {
-      track.solo = !track.solo;
-    }
-
-    updateTrackMuteSoloGains();
-  }
-
-  /* -------------------------------------------------------
-     VOICE RECORDING
-     ------------------------------------------------------- */
-
-  async function startVoiceRecording() {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      toast(
-        "Microphone hin deeggaramu. HTTPS website irratti yaali."
-      );
-      return;
+        nodes.volume.gain.setTargetAtTime(
+            track.muted || shouldSolo ? 0 : track.volume,
+            now,
+            0.015
+        );
     }
 
-    if (!window.MediaRecorder) {
-      toast(
-        "Browseriin kee audio recording hin deeggaru."
-      );
-      return;
+    function updateMasterVolume() {
+        if (!state.masterGain || !state.audioContext) {
+            return;
+        }
+
+        const slider = $("mixerVolume");
+        const volume = slider
+            ? Number(slider.value) / 100
+            : 1;
+
+        state.masterGain.gain.setTargetAtTime(
+            clamp(volume, 0, 1.5),
+            state.audioContext.currentTime,
+            0.02
+        );
+
+        safeText(
+            $("masterLevelText"),
+            Math.round(volume * 100) + "%"
+        );
     }
 
-    try {
-      const stream =
-        await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
+    /* =====================================================
+       4. TRACK MANAGEMENT
+       ===================================================== */
+
+    function createTrack(options = {}) {
+        const track = {
+            id: state.nextTrackId++,
+            name: options.name || "Audio Track",
+            type: options.type || "music",
+            buffer: options.buffer || null,
+            fileName: options.fileName || "",
+            volume: options.volume ?? 1,
+            pan: options.pan ?? 0,
+            bass: options.bass ?? 0,
+            mid: options.mid ?? 0,
+            treble: options.treble ?? 0,
+            reverb: options.reverb ?? 0,
+            delay: options.delay ?? 0,
+            distortion: options.distortion ?? 0,
+            muted: false,
+            solo: false,
+            startTime: options.startTime ?? 0,
+            trimStart: options.trimStart ?? 0,
+            trimEnd: options.trimEnd ?? null,
+            nodes: null,
+            source: null,
+            waveform: null,
+            selected: false,
+            createdAt: Date.now()
+        };
+
+        if (track.buffer && track.trimEnd === null) {
+            track.trimEnd = track.buffer.duration;
+        }
+
+        state.tracks.push(track);
+
+        makeTrackNodes(track);
+        renderTrackList();
+        renderTimeline();
+        updateTrackSelectors();
+        saveUndoState();
+
+        return track;
+    }
+
+    function getActiveTrack() {
+        return state.tracks.find(
+            (track) => track.id === state.activeTrackId
+        ) || state.tracks.find(
+            (track) => track.buffer
+        ) || null;
+    }
+
+    function selectTrack(trackId) {
+        const track = state.tracks.find(
+            (item) => item.id === Number(trackId)
+        );
+
+        if (!track) {
+            return;
+        }
+
+        state.activeTrackId = track.id;
+
+        renderTrackList();
+        renderTimeline();
+        loadTrackControls(track);
+        updateTrackInformation(track);
+    }
+
+    function loadTrackControls(track) {
+        if (!track) {
+            return;
+        }
+
+        setSlider("volumeControl", track.volume * 100);
+        setSlider("panControl", track.pan * 100);
+        setSlider("bassControl", track.bass);
+        setSlider("midControl", track.mid);
+        setSlider("trebleControl", track.treble);
+        setSlider("reverbControl", track.reverb);
+        setSlider("delayControl", track.delay);
+        setSlider("distortionControl", track.distortion);
+
+        safeText(
+            $("volumeValue"),
+            Math.round(track.volume * 100) + "%"
+        );
+
+        safeText($("panValue"), Math.round(track.pan * 100));
+        safeText($("bassValue"), track.bass + " dB");
+        safeText($("midValue"), track.mid + " dB");
+        safeText($("trebleValue"), track.treble + " dB");
+        safeText($("reverbValue"), track.reverb + "%");
+        safeText($("delayValue"), track.delay + "%");
+        safeText(
+            $("distortionValue"),
+            track.distortion + "%"
+        );
+    }
+
+    function setSlider(id, value) {
+        const element = $(id);
+
+        if (element) {
+            element.value = String(value);
+        }
+    }
+
+    function updateTrackInformation(track) {
+        if (!track) {
+            return;
+        }
+
+        safeText(
+            $("currentTrackTitle"),
+            track.name
+        );
+
+        safeText(
+            $("timelineTrackName"),
+            track.name
+        );
+
+        safeText(
+            $("audioFormat"),
+            track.buffer
+                ? track.buffer.numberOfChannels +
+                  " channel • " +
+                  track.buffer.sampleRate +
+                  " Hz"
+                : "No audio loaded"
+        );
+
+        safeText(
+            $("trackDurationText"),
+            formatTime(track.buffer?.duration || 0)
+        );
+
+        safeText(
+            $("playbackBadge"),
+            track.buffer ? "Ready" : "Empty"
+        );
+    }
+
+    function removeTrack(trackId) {
+        const index = state.tracks.findIndex(
+            (track) => track.id === Number(trackId)
+        );
+
+        if (index === -1) {
+            return;
+        }
+
+        const track = state.tracks[index];
+
+        if (track.source) {
+            try {
+                track.source.stop();
+            } catch (_) {}
+        }
+
+        state.tracks.splice(index, 1);
+
+        if (state.activeTrackId === track.id) {
+            state.activeTrackId =
+                state.tracks[0]?.id ?? null;
+        }
+
+        renderTrackList();
+        renderTimeline();
+        updateTrackSelectors();
+
+        const active = getActiveTrack();
+
+        if (active) {
+            loadTrackControls(active);
+            updateTrackInformation(active);
+        }
+
+        saveUndoState();
+        showToast("Track haqameera.");
+    }
+
+    function renderTrackList() {
+        const list = $("trackList");
+
+        if (!list) {
+            return;
+        }
+
+        list.innerHTML = "";
+
+        if (state.tracks.length === 0) {
+            const empty = document.createElement("div");
+
+            empty.className = "empty-track-list";
+            empty.textContent = "Audio faayila galchi.";
+
+            list.appendChild(empty);
+            return;
+        }
+
+        state.tracks.forEach((track) => {
+            const item = document.createElement("div");
+
+            item.className = "track-list-item";
+
+            if (track.id === state.activeTrackId) {
+                item.classList.add("active");
+            }
+
+            const title = document.createElement("button");
+
+            title.type = "button";
+            title.className = "track-select-button";
+            title.textContent = track.name;
+            title.addEventListener("click", () => {
+                selectTrack(track.id);
+            });
+
+            const detail = document.createElement("small");
+
+            detail.textContent = track.buffer
+                ? formatTime(track.buffer.duration)
+                : "Empty track";
+
+            const mute = document.createElement("button");
+
+            mute.type = "button";
+            mute.textContent = track.muted ? "Unmute" : "Mute";
+
+            mute.addEventListener("click", () => {
+                track.muted = !track.muted;
+
+                applyTrackEffects(track);
+                renderTrackList();
+                renderTimeline();
+            });
+
+            const remove = document.createElement("button");
+
+            remove.type = "button";
+            remove.textContent = "×";
+            remove.title = "Remove track";
+
+            remove.addEventListener("click", () => {
+                removeTrack(track.id);
+            });
+
+            item.append(title, detail, mute, remove);
+            list.appendChild(item);
+        });
+    }
+
+    function updateTrackSelectors() {
+        $$(".timeline-track[data-track-type]").forEach(
+            (row) => {
+                const type = row.dataset.trackType;
+
+                const matchingTrack = state.tracks.find(
+                    (track) => track.type === type
+                );
+
+                row.dataset.trackId = matchingTrack
+                    ? String(matchingTrack.id)
+                    : "";
+            }
+        );
+    }
+
+    /* =====================================================
+       5. IMPORT AUDIO
+       ===================================================== */
+
+    async function decodeAudioFile(file) {
+        const context = ensureAudioContext();
+
+        if (!context) {
+            throw new Error("Audio engine hin jalqabne.");
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+
+        return await context.decodeAudioData(arrayBuffer);
+    }
+
+    async function importAudioFiles(files) {
+        const validFiles = Array.from(files || []).filter(
+            (file) =>
+                file.type.startsWith("audio/") ||
+                /\.(wav|mp3|ogg|m4a|aac|flac|webm)$/i.test(
+                    file.name
+                )
+        );
+
+        if (validFiles.length === 0) {
+            showToast("Faayila audio sirrii filadhu.");
+            return;
+        }
+
+        setStatus("Audio fe'amaa jira...");
+
+        for (const file of validFiles) {
+            try {
+                const buffer = await decodeAudioFile(file);
+
+                const track = createTrack({
+                    name: file.name,
+                    fileName: file.name,
+                    type: "music",
+                    buffer
+                });
+
+                state.activeTrackId = track.id;
+
+                selectTrack(track.id);
+
+                showToast(
+                    file.name + " fe'ameera."
+                );
+            } catch (error) {
+                console.error("Audio import failed:", error);
+
+                showToast(
+                    file.name +
+                    " banamuu hin dandeenye. Faayila biraa yaali."
+                );
+            }
+        }
+
+        setStatus("Audio qophaa'eera.");
+        renderTimeline();
+        renderTrackList();
+    }
+
+    /* =====================================================
+       6. WAVEFORM DRAWING
+       ===================================================== */
+
+    function drawWaveform(canvas, buffer, color = null) {
+        if (!canvas) {
+            return;
+        }
+
+        const rect = canvas.getBoundingClientRect();
+
+        const width = Math.max(
+            300,
+            Math.floor(rect.width || canvas.width || 800)
+        );
+
+        const height = Math.max(
+            60,
+            Math.floor(rect.height || canvas.height || 120)
+        );
+
+        const dpr = window.devicePixelRatio || 1;
+
+        canvas.width = width * dpr;
+        canvas.height = height * dpr;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+            return;
+        }
+
+        context.setTransform(dpr, 0, 0, dpr, 0, 0);
+        context.clearRect(0, 0, width, height);
+
+        context.fillStyle = "#10131c";
+        context.fillRect(0, 0, width, height);
+
+        context.strokeStyle = "#252b3a";
+        context.lineWidth = 1;
+
+        context.beginPath();
+        context.moveTo(0, height / 2);
+        context.lineTo(width, height / 2);
+        context.stroke();
+
+        if (!buffer) {
+            context.fillStyle = "#8991a5";
+            context.font = "13px sans-serif";
+            context.textAlign = "center";
+
+            context.fillText(
+                "Audio galchi; waveform asitti mul'ata",
+                width / 2,
+                height / 2 - 10
+            );
+
+            return;
+        }
+
+        const channelCount = buffer.numberOfChannels;
+        const channels = [];
+
+        for (let c = 0; c < channelCount; c++) {
+            channels.push(buffer.getChannelData(c));
+        }
+
+        const samples = channels[0].length;
+        const samplesPerPixel = Math.max(
+            1,
+            Math.floor(samples / width)
+        );
+
+        context.fillStyle = color || "#66e0c2";
+
+        for (let x = 0; x < width; x++) {
+            const start = x * samplesPerPixel;
+            const end = Math.min(
+                samples,
+                start + samplesPerPixel
+            );
+
+            let min = 1;
+            let max = -1;
+
+            for (let i = start; i < end; i++) {
+                let sample = 0;
+
+                for (const channel of channels) {
+                    sample += channel[i] || 0;
+                }
+
+                sample /= channelCount;
+
+                if (sample < min) {
+                    min = sample;
+                }
+
+                if (sample > max) {
+                    max = sample;
+                }
+            }
+
+            const y1 = (1 + min) * height / 2;
+            const y2 = (1 + max) * height / 2;
+
+            context.fillRect(
+                x,
+                y1,
+                1,
+                Math.max(1, y2 - y1)
+            );
+        }
+    }
+
+    function renderTimeline() {
+        const canvas = $("waveformCanvas");
+        const empty = $("emptyWaveform");
+        const active = getActiveTrack();
+
+        if (canvas) {
+            drawWaveform(canvas, active?.buffer || null);
+
+            canvas.style.width =
+                Math.max(100, state.zoom * 100) + "%";
+        }
+
+        if (empty) {
+            empty.hidden = Boolean(active?.buffer);
+        }
+
+        const duration = active?.buffer?.duration || 0;
+
+        safeText(
+            $("durationDisplay"),
+            formatTime(duration)
+        );
+
+        safeText(
+            $("timeDisplay"),
+            formatTime(getCurrentPosition())
+        );
+
+        if ($("seekBar")) {
+            $("seekBar").max = String(
+                Math.max(1, duration * 1000)
+            );
+
+            $("seekBar").value = String(
+                getCurrentPosition() * 1000
+            );
+        }
+
+        safeText(
+            $("zoomValue"),
+            Math.round(state.zoom * 100) + "%"
+        );
+
+        const content = $("timelineContent");
+
+        if (content) {
+            content.style.minWidth =
+                Math.max(100, state.zoom * 100) + "%";
+        }
+
+        renderRuler(duration);
+        renderTrackClips();
+    }
+
+    function renderRuler(duration) {
+        const ruler = $("timelineRuler");
+
+        if (!ruler) {
+            return;
+        }
+
+        ruler.innerHTML = "";
+
+        const seconds = Math.max(10, Math.ceil(duration));
+        const interval = seconds > 120 ? 10 :
+            seconds > 60 ? 5 : 1;
+
+        for (let second = 0; second <= seconds; second += interval) {
+            const marker = document.createElement("span");
+
+            marker.className = "ruler-marker";
+            marker.textContent = formatTime(second).split(".")[0];
+            marker.style.left =
+                (second / seconds) * 100 + "%";
+
+            ruler.appendChild(marker);
+        }
+    }
+
+    function renderTrackClips() {
+        const active = getActiveTrack();
+
+        const mainClip = $("mainAudioClip");
+        const voiceClip = $("voiceAudioClip");
+        const keyboardClip = $("keyboardAudioClip");
+
+        if (mainClip) {
+            mainClip.hidden = true;
+        }
+
+        if (voiceClip) {
+            voiceClip.hidden = true;
+        }
+
+        if (keyboardClip) {
+            keyboardClip.hidden = true;
+        }
+
+        state.tracks.forEach((track) => {
+            let element = null;
+
+            if (track.type === "voice") {
+                element = voiceClip;
+            } else if (track.type === "keyboard") {
+                element = keyboardClip;
+            } else {
+                element = mainClip;
+            }
+
+            if (!element || !track.buffer) {
+                return;
+            }
+
+            element.hidden = false;
+            element.textContent = track.name;
+            element.dataset.trackId = String(track.id);
+
+            element.style.left =
+                (track.startTime * state.zoom * 100) + "px";
+
+            element.style.width =
+                Math.max(
+                    50,
+                    (track.buffer.duration -
+                        track.trimStart -
+                        (track.buffer.duration -
+                            (track.trimEnd ?? track.buffer.duration))) *
+                    state.zoom *
+                    100
+                ) + "px";
+
+            if (track.id === active?.id) {
+                element.classList.add("active");
+            } else {
+                element.classList.remove("active");
+            }
         });
 
-      state.mediaStream = stream;
-      state.recordingChunks = [];
+        updatePlayhead();
+    }
 
-      let options = {};
+    function updatePlayhead() {
+        const playhead = $("playhead");
 
-      if (
-        MediaRecorder.isTypeSupported(
-          "audio/webm;codecs=opus"
-        )
-      ) {
-        options.mimeType = "audio/webm;codecs=opus";
-      }
-
-      state.mediaRecorder =
-        new MediaRecorder(stream, options);
-
-      state.mediaRecorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          state.recordingChunks.push(event.data);
+        if (!playhead) {
+            return;
         }
-      };
 
-      state.mediaRecorder.onstop = () => {
-        const mimeType =
-          state.mediaRecorder?.mimeType ||
-          "audio/webm";
+        const position = getCurrentPosition();
 
-        const blob = new Blob(
-          state.recordingChunks,
-          { type: mimeType }
+        playhead.style.left =
+            (position * state.zoom * 100) + "px";
+    }
+
+    /* =====================================================
+       7. PLAYBACK
+       ===================================================== */
+
+    function getCurrentPosition() {
+        if (!state.playing) {
+            const active = getActiveTrack();
+
+            if (!active || !state.audioContext) {
+                return state.playStartOffset || 0;
+            }
+
+            return clamp(
+                state.playStartOffset || 0,
+                0,
+                active.buffer?.duration || 0
+            );
+        }
+
+        const context = state.audioContext;
+
+        return Math.max(
+            0,
+            state.playStartOffset +
+            (context.currentTime - state.playStartContextTime)
+        );
+    }
+
+    function stopTrackSources() {
+        state.tracks.forEach((track) => {
+            if (track.source) {
+                try {
+                    track.source.onended = null;
+                    track.source.stop();
+                } catch (_) {}
+
+                try {
+                    track.source.disconnect();
+                } catch (_) {}
+
+                track.source = null;
+            }
+        });
+    }
+
+    function playAllTracks(startAt = 0) {
+        const context = ensureAudioContext();
+
+        if (!context) {
+            return;
+        }
+
+        if (!state.tracks.some((track) => track.buffer)) {
+            showToast("Jalqaba audio galchi.");
+            return;
+        }
+
+        stopTrackSources();
+
+        state.playing = true;
+        state.playStartOffset = Math.max(0, startAt);
+        state.playStartContextTime = context.currentTime;
+
+        const speed = clamp(
+            readNumber("playbackSpeed", 1),
+            0.25,
+            2
         );
 
-        if (state.currentRecordingUrl) {
-          URL.revokeObjectURL(
-            state.currentRecordingUrl
-          );
+        state.tracks.forEach((track) => {
+            if (!track.buffer || track.muted) {
+                return;
+            }
+
+            if (
+                state.soloTrackId !== null &&
+                state.soloTrackId !== track.id
+            ) {
+                return;
+            }
+
+            const source = context.createBufferSource();
+
+            source.buffer = track.buffer;
+            source.playbackRate.value = speed;
+
+            makeTrackNodes(track);
+
+            source.connect(track.nodes.input);
+
+            const duration = track.buffer.duration;
+            const trackStart = Math.max(
+                0,
+                startAt - track.startTime
+            );
+
+            if (trackStart >= duration) {
+                return;
+            }
+
+            const trimStart = track.trimStart || 0;
+            const trimEnd = track.trimEnd ?? duration;
+
+            const offset = clamp(
+                trimStart + trackStart,
+                trimStart,
+                trimEnd
+            );
+
+            const playDuration = Math.max(
+                0,
+                trimEnd - offset
+            );
+
+            if (playDuration <= 0) {
+                return;
+            }
+
+            source.start(
+                0,
+                offset,
+                playDuration
+            );
+
+            track.source = source;
+        });
+
+        const playButton = $("playBtn");
+
+        if (playButton) {
+            playButton.textContent = "Pause";
         }
 
-        state.currentRecordingUrl =
-          URL.createObjectURL(blob);
+        safeText($("playbackBadge"), "Playing");
+
+        setStatus("Audio taphachaa jira.");
+
+        cancelAnimationFrame(state.animationFrame);
+
+        const animate = () => {
+            if (!state.playing) {
+                return;
+            }
+
+            const active = getActiveTrack();
+            const duration = active?.buffer?.duration || 0;
+            const position = getCurrentPosition();
+
+            safeText(
+                $("timeDisplay"),
+                formatTime(position)
+            );
+
+            if ($("seekBar")) {
+                $("seekBar").value = String(
+                    position * 1000
+                );
+            }
+
+            updatePlayhead();
+            updateMasterMeter();
+            updateTrackMeters();
+
+            if (duration > 0 && position >= duration) {
+                stopPlayback();
+                return;
+            }
+
+            state.animationFrame =
+                requestAnimationFrame(animate);
+        };
+
+        state.animationFrame =
+            requestAnimationFrame(animate);
+    }
+
+    function pausePlayback() {
+        if (!state.playing) {
+            return;
+        }
+
+        state.playStartOffset = getCurrentPosition();
+        state.playing = false;
+
+        stopTrackSources();
+
+        cancelAnimationFrame(state.animationFrame);
+
+        const button = $("playBtn");
+
+        if (button) {
+            button.textContent = "Play";
+        }
+
+        safeText($("playbackBadge"), "Paused");
+        setStatus("Audio dhaabbate.");
+
+        renderTimeline();
+    }
+
+    function stopPlayback() {
+        state.playing = false;
+        state.playStartOffset = 0;
+
+        stopTrackSources();
+
+        cancelAnimationFrame(state.animationFrame);
+
+        const button = $("playBtn");
+
+        if (button) {
+            button.textContent = "Play";
+        }
+
+        safeText($("playbackBadge"), "Stopped");
+        safeText($("timeDisplay"), formatTime(0));
+
+        if ($("seekBar")) {
+            $("seekBar").value = "0";
+        }
+
+        setStatus("Playback dhaabbate.");
+
+        renderTimeline();
+    }
+
+    function togglePlayback() {
+        if (state.playing) {
+            pausePlayback();
+        } else {
+            playAllTracks(getCurrentPosition());
+        }
+    }
+
+    function seekTo(seconds) {
+        const active = getActiveTrack();
+        const duration = active?.buffer?.duration || 0;
+
+        state.playStartOffset = clamp(
+            seconds,
+            0,
+            duration
+        );
+
+        if (state.playing) {
+            playAllTracks(state.playStartOffset);
+        } else {
+            safeText(
+                $("timeDisplay"),
+                formatTime(state.playStartOffset)
+            );
+
+            updatePlayhead();
+        }
+    }
+
+    /* =====================================================
+       8. TRACK EDITING
+       ===================================================== */
+
+    function splitActiveTrack() {
+        const track = getActiveTrack();
+
+        if (!track || !track.buffer) {
+            showToast("Track audio qabu filadhu.");
+            return;
+        }
+
+        const position = getCurrentPosition();
+
+        if (
+            position <= track.trimStart ||
+            position >= (track.trimEnd ?? track.buffer.duration)
+        ) {
+            showToast(
+                "Audio keessaa bakka qooduu barbaaddu filadhu."
+            );
+
+            return;
+        }
+
+        const first = { ...track };
+        const second = { ...track };
+
+        first.id = state.nextTrackId++;
+        second.id = state.nextTrackId++;
+
+        first.nodes = null;
+        second.nodes = null;
+        first.source = null;
+        second.source = null;
+
+        first.trimEnd = position;
+        second.trimStart = position;
+
+        first.name = track.name + " (A)";
+        second.name = track.name + " (B)";
+
+        const originalIndex = state.tracks.indexOf(track);
+
+        state.tracks.splice(
+            originalIndex,
+            1,
+            first,
+            second
+        );
+
+        state.activeTrackId = first.id;
+
+        makeTrackNodes(first);
+        makeTrackNodes(second);
+
+        renderTrackList();
+        renderTimeline();
+        loadTrackControls(first);
+
+        saveUndoState();
+
+        showToast("Audio bakka filatametti qoodame.");
+    }
+
+    function trimActiveTrackStart() {
+        const track = getActiveTrack();
+
+        if (!track?.buffer) {
+            showToast("Audio track filadhu.");
+            return;
+        }
+
+        const position = getCurrentPosition();
+
+        if (
+            position <= 0 ||
+            position >= (track.trimEnd ?? track.buffer.duration)
+        ) {
+            showToast("Bakka trim sirrii filadhu.");
+            return;
+        }
+
+        track.trimStart = position;
+
+        saveUndoState();
+        renderTimeline();
+
+        showToast("Kutaan jalqabaa trim godhame.");
+    }
+
+    function trimActiveTrackEnd() {
+        const track = getActiveTrack();
+
+        if (!track?.buffer) {
+            showToast("Audio track filadhu.");
+            return;
+        }
+
+        const position = getCurrentPosition();
+
+        if (
+            position <= track.trimStart ||
+            position >= track.buffer.duration
+        ) {
+            showToast("Bakka trim sirrii filadhu.");
+            return;
+        }
+
+        track.trimEnd = position;
+
+        saveUndoState();
+        renderTimeline();
+
+        showToast("Kutaan dhumaa trim godhame.");
+    }
+
+    function deleteActiveAudio() {
+        const track = getActiveTrack();
+
+        if (!track) {
+            showToast("Track filatame hin jiru.");
+            return;
+        }
+
+        removeTrack(track.id);
+    }
+
+    /* =====================================================
+       9. LIVE CONTROL ADJUSTMENTS
+       ===================================================== */
+
+    function updateActiveControl(controlId, value) {
+        const track = getActiveTrack();
+
+        if (!track) {
+            return;
+        }
+
+        switch (controlId) {
+            case "volumeControl":
+                track.volume = clamp(value / 100, 0, 1.5);
+                safeText($("volumeValue"), value + "%");
+                break;
+
+            case "panControl":
+                track.pan = clamp(value / 100, -1, 1);
+                safeText($("panValue"), value);
+                break;
+
+            case "bassControl":
+                track.bass = clamp(value, -24, 24);
+                safeText($("bassValue"), value + " dB");
+                break;
+
+            case "midControl":
+                track.mid = clamp(value, -24, 24);
+                safeText($("midValue"), value + " dB");
+                break;
+
+            case "trebleControl":
+                track.treble = clamp(value, -24, 24);
+                safeText($("trebleValue"), value + " dB");
+                break;
+
+            case "reverbControl":
+                track.reverb = clamp(value, 0, 100);
+                safeText($("reverbValue"), value + "%");
+                break;
+
+            case "delayControl":
+                track.delay = clamp(value, 0, 100);
+                safeText($("delayValue"), value + "%");
+                break;
+
+            case "distortionControl":
+                track.distortion = clamp(value, 0, 100);
+                safeText(
+                    $("distortionValue"),
+                    value + "%"
+                );
+                break;
+        }
+
+        applyTrackEffects(track);
+    }
+
+    function resetActiveAdjustments() {
+        const track = getActiveTrack();
+
+        if (!track) {
+            showToast("Track filadhu.");
+            return;
+        }
+
+        track.volume = 1;
+        track.pan = 0;
+        track.bass = 0;
+        track.mid = 0;
+        track.treble = 0;
+        track.reverb = 0;
+        track.delay = 0;
+        track.distortion = 0;
+
+        loadTrackControls(track);
+        applyTrackEffects(track);
+
+        saveUndoState();
+
+        showToast("Audio adjustments reset ta'aniiru.");
+    }
+
+    function toggleCompare() {
+        const track = getActiveTrack();
+
+        if (!track) {
+            showToast("Track filadhu.");
+            return;
+        }
+
+        state.comparing = !state.comparing;
+
+        if (state.comparing) {
+            state.beforeCompare = {
+                volume: track.volume,
+                pan: track.pan,
+                bass: track.bass,
+                mid: track.mid,
+                treble: track.treble,
+                reverb: track.reverb,
+                delay: track.delay,
+                distortion: track.distortion
+            };
+
+            track.bass = 0;
+            track.mid = 0;
+            track.treble = 0;
+            track.reverb = 0;
+            track.delay = 0;
+            track.distortion = 0;
+
+            safeText(
+                $("compareStatus"),
+                "Original audio"
+            );
+        } else if (state.beforeCompare) {
+            Object.assign(
+                track,
+                state.beforeCompare
+            );
+
+            state.beforeCompare = null;
+
+            safeText(
+                $("compareStatus"),
+                "Edited audio"
+            );
+        }
+
+        loadTrackControls(track);
+        applyTrackEffects(track);
+    }
+
+    /* =====================================================
+       10. VOICE RECORDING
+       ===================================================== */
+
+    async function startVoiceRecording() {
+        if (!navigator.mediaDevices?.getUserMedia) {
+            showToast(
+                "Microphone browser kana keessatti hin deeggaramu.",
+                5000
+            );
+
+            return;
+        }
+
+        if (!window.MediaRecorder) {
+            showToast(
+                "Browser kana MediaRecorder hin deeggaru."
+            );
+
+            return;
+        }
+
+        try {
+            state.mediaStream =
+                await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true
+                    }
+                });
+
+            state.recordingChunks = [];
+
+            let options = {};
+
+            if (
+                MediaRecorder.isTypeSupported(
+                    "audio/webm;codecs=opus"
+                )
+            ) {
+                options.mimeType = "audio/webm;codecs=opus";
+            }
+
+            state.mediaRecorder = new MediaRecorder(
+                state.mediaStream,
+                options
+            );
+
+            state.mediaRecorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    state.recordingChunks.push(event.data);
+                }
+            };
+
+            state.mediaRecorder.onstop = () => {
+                state.recordingBlob = new Blob(
+                    state.recordingChunks,
+                    {
+                        type:
+                            state.mediaRecorder.mimeType ||
+                            "audio/webm"
+                    }
+                );
+
+                if (state.recordingUrl) {
+                    URL.revokeObjectURL(
+                        state.recordingUrl
+                    );
+                }
+
+                state.recordingUrl = URL.createObjectURL(
+                    state.recordingBlob
+                );
+
+                const preview = $("recordingPreview");
+
+                if (preview) {
+                    preview.src = state.recordingUrl;
+                }
+
+                const result = $("recordingResult");
+
+                if (result) {
+                    result.hidden = false;
+                }
+
+                safeText(
+                    $("recordingResultStatus"),
+                    "Recording qophaa'eera."
+                );
+
+                state.mediaStream?.getTracks().forEach(
+                    (track) => track.stop()
+                );
+
+                state.mediaStream = null;
+                setStatus("Voice recording xumurame.");
+            };
+
+            state.recordingStartedAt = Date.now();
+            state.recordingElapsedBeforePause = 0;
+            state.recordingPaused = false;
+
+            state.mediaRecorder.start(250);
+
+            if ($("recordingOrb")) {
+                $("recordingOrb").classList.add("recording");
+            }
+
+            safeText($("recordingState"), "Recording...");
+            setStatus("Microphone recording jira.");
+
+            startRecordingTimer();
+
+            setButtonEnabled("recordBtn", false);
+            setButtonEnabled("pauseRecordBtn", true);
+            setButtonEnabled("resumeRecordBtn", false);
+            setButtonEnabled("stopRecordBtn", true);
+        } catch (error) {
+            console.error("Microphone error:", error);
+
+            showToast(
+                "Microphone hin banamne. Permission kenni."
+            );
+        }
+    }
+
+    function startRecordingTimer() {
+        clearInterval(state.recordingTimer);
+
+        state.recordingTimer = setInterval(() => {
+            if (
+                !state.mediaRecorder ||
+                state.mediaRecorder.state === "inactive"
+            ) {
+                return;
+            }
+
+            const elapsed =
+                state.recordingElapsedBeforePause +
+                (
+                    state.recordingPaused
+                        ? 0
+                        : (Date.now() -
+                            state.recordingStartedAt) / 1000
+                );
+
+            safeText(
+                $("recordingTimer"),
+                formatTime(elapsed)
+            );
+        }, 100);
+    }
+
+    function pauseVoiceRecording() {
+        if (
+            !state.mediaRecorder ||
+            state.mediaRecorder.state !== "recording"
+        ) {
+            return;
+        }
+
+        state.recordingElapsedBeforePause +=
+            (Date.now() - state.recordingStartedAt) / 1000;
+
+        state.mediaRecorder.pause();
+        state.recordingPaused = true;
+
+        safeText($("recordingState"), "Paused");
+
+        setButtonEnabled("pauseRecordBtn", false);
+        setButtonEnabled("resumeRecordBtn", true);
+    }
+
+    function resumeVoiceRecording() {
+        if (
+            !state.mediaRecorder ||
+            state.mediaRecorder.state !== "paused"
+        ) {
+            return;
+        }
+
+        state.mediaRecorder.resume();
+
+        state.recordingStartedAt = Date.now();
+        state.recordingPaused = false;
+
+        safeText($("recordingState"), "Recording...");
+
+        setButtonEnabled("pauseRecordBtn", true);
+        setButtonEnabled("resumeRecordBtn", false);
+    }
+
+    function stopVoiceRecording() {
+        if (
+            !state.mediaRecorder ||
+            state.mediaRecorder.state === "inactive"
+        ) {
+            return;
+        }
+
+        clearInterval(state.recordingTimer);
+
+        state.mediaRecorder.stop();
+
+        if ($("recordingOrb")) {
+            $("recordingOrb").classList.remove("recording");
+        }
+
+        safeText($("recordingState"), "Finished");
+
+        setButtonEnabled("recordBtn", true);
+        setButtonEnabled("pauseRecordBtn", false);
+        setButtonEnabled("resumeRecordBtn", false);
+        setButtonEnabled("stopRecordBtn", false);
+    }
+
+    async function useVoiceRecording() {
+        if (!state.recordingBlob) {
+            showToast("Voice recording hin jiru.");
+            return;
+        }
+
+        try {
+            const buffer = await decodeAudioFile(
+                new File(
+                    [state.recordingBlob],
+                    "voice-recording.webm",
+                    {
+                        type:
+                            state.recordingBlob.type ||
+                            "audio/webm"
+                    }
+                )
+            );
+
+            const track = createTrack({
+                name: "Voice Recording",
+                type: "voice",
+                buffer,
+                fileName: "voice-recording.webm"
+            });
+
+            selectTrack(track.id);
+
+            showToast(
+                "Voice recording timeline irratti dabalame."
+            );
+        } catch (error) {
+            console.error(error);
+
+            showToast(
+                "Recording decode hin danda'amne."
+            );
+        }
+    }
+
+    function downloadVoiceRecording() {
+        if (!state.recordingBlob) {
+            showToast("Recording hin jiru.");
+            return;
+        }
+
+        downloadBlob(
+            state.recordingBlob,
+            "naol-voice-recording.webm"
+        );
+    }
+
+    function discardVoiceRecording() {
+        if (state.recordingUrl) {
+            URL.revokeObjectURL(state.recordingUrl);
+        }
+
+        state.recordingUrl = null;
+        state.recordingBlob = null;
+        state.recordingChunks = [];
 
         const preview = $("recordingPreview");
 
         if (preview) {
-          preview.src = state.currentRecordingUrl;
-          preview.load();
+            preview.removeAttribute("src");
+            preview.load();
         }
-
-        setStatus(
-          "recordingResultStatus",
-          "Recording ready"
-        );
 
         const result = $("recordingResult");
 
         if (result) {
-          result.classList.remove("hidden");
+            result.hidden = true;
         }
 
-        stopMicrophoneTracks();
+        safeText(
+            $("recordingResultStatus"),
+            "Recording hin jiru."
+        );
 
-        toast("Recording finished");
-      };
-
-      state.mediaRecorder.start(250);
-
-      state.recordingStartedAt = Date.now();
-      state.recordingElapsedBeforePause = 0;
-      state.recordingPaused = false;
-
-      setRecordingState("Recording");
-
-      clearInterval(state.recordingTimer);
-
-      state.recordingTimer = setInterval(
-        updateRecordingTimer,
-        250
-      );
-
-      startRecordingVisualizer(stream);
-
-      updateRecordingButtons();
-
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        "Microphone hayyama hin arganne. Browser settings ilaali."
-      );
-    }
-  }
-
-  function updateRecordingTimer() {
-    if (
-      !state.recordingStartedAt ||
-      state.recordingPaused
-    ) {
-      return;
+        showToast("Recording haqameera.");
     }
 
-    const elapsed =
-      state.recordingElapsedBeforePause +
-      (Date.now() - state.recordingStartedAt) / 1000;
+    /* =====================================================
+       11. VIRTUAL KEYBOARD
+       ===================================================== */
 
-    setStatus(
-      "recordingTimer",
-      formatTime(elapsed)
-    );
-  }
+    const keyboardNotes = [
+        { name: "C", semitone: 0, black: false },
+        { name: "C#", semitone: 1, black: true },
+        { name: "D", semitone: 2, black: false },
+        { name: "D#", semitone: 3, black: true },
+        { name: "E", semitone: 4, black: false },
+        { name: "F", semitone: 5, black: false },
+        { name: "F#", semitone: 6, black: true },
+        { name: "G", semitone: 7, black: false },
+        { name: "G#", semitone: 8, black: true },
+        { name: "A", semitone: 9, black: false },
+        { name: "A#", semitone: 10, black: true },
+        { name: "B", semitone: 11, black: false }
+    ];
 
-  function setRecordingState(message) {
-    setStatus("recordingState", message);
-
-    const orb = $("recordingOrb");
-
-    if (orb) {
-      orb.classList.toggle(
-        "recording",
-        message === "Recording"
-      );
-    }
-  }
-
-  function pauseVoiceRecording() {
-    if (
-      !state.mediaRecorder ||
-      state.mediaRecorder.state !== "recording"
-    ) {
-      return;
+    function getKeyboardInstrument() {
+        return $("instrumentSelect")?.value || "piano";
     }
 
-    state.recordingElapsedBeforePause +=
-      (Date.now() - state.recordingStartedAt) / 1000;
-
-    state.recordingPaused = true;
-
-    state.mediaRecorder.pause();
-
-    clearInterval(state.recordingTimer);
-
-    setRecordingState("Paused");
-    updateRecordingButtons();
-  }
-
-  function resumeVoiceRecording() {
-    if (
-      !state.mediaRecorder ||
-      state.mediaRecorder.state !== "paused"
-    ) {
-      return;
+    function getKeyboardOctave() {
+        return clamp(
+            readNumber("octaveSelect", 4),
+            2,
+            6
+        );
     }
 
-    state.recordingStartedAt = Date.now();
-    state.recordingPaused = false;
-
-    state.mediaRecorder.resume();
-
-    clearInterval(state.recordingTimer);
-
-    state.recordingTimer = setInterval(
-      updateRecordingTimer,
-      250
-    );
-
-    setRecordingState("Recording");
-    updateRecordingButtons();
-  }
-
-  function stopVoiceRecording() {
-    if (
-      !state.mediaRecorder ||
-      state.mediaRecorder.state === "inactive"
-    ) {
-      toast("Recording hin jalqabne.");
-      return;
+    function getKeyboardVolume() {
+        return clamp(
+            readNumber("keyboardVolume", 70) / 100,
+            0,
+            1
+        );
     }
 
-    clearInterval(state.recordingTimer);
+    function buildKeyboard() {
+        const keyboard = $("pianoKeyboard");
 
-    state.mediaRecorder.stop();
-
-    setRecordingState("Finished");
-
-    updateRecordingButtons();
-  }
-
-  function stopMicrophoneTracks() {
-    if (state.mediaStream) {
-      state.mediaStream
-        .getTracks()
-        .forEach((track) => track.stop());
-
-      state.mediaStream = null;
-    }
-  }
-
-  function updateRecordingButtons() {
-    const recorder = state.mediaRecorder;
-
-    const active =
-      recorder && recorder.state === "recording";
-
-    const paused =
-      recorder && recorder.state === "paused";
-
-    const start = $("recordBtn");
-    const pause = $("pauseRecordBtn");
-    const resume = $("resumeRecordBtn");
-    const stop = $("stopRecordBtn");
-
-    if (start) start.disabled = Boolean(active || paused);
-    if (pause) pause.disabled = !active;
-    if (resume) resume.disabled = !paused;
-    if (stop) stop.disabled = !(active || paused);
-  }
-
-  function startRecordingVisualizer(stream) {
-    const canvas = $("recordingWaveform");
-
-    if (!canvas || !state.audioContext) return;
-
-    const context = state.audioContext;
-    const source = context.createMediaStreamSource(stream);
-    const analyser = context.createAnalyser();
-
-    analyser.fftSize = 1024;
-
-    source.connect(analyser);
-
-    const data = new Uint8Array(analyser.fftSize);
-
-    const draw = () => {
-      if (!state.mediaStream) return;
-
-      const ctx = canvas.getContext("2d");
-
-      if (!ctx) return;
-
-      const width = canvas.width =
-        Math.max(300, canvas.clientWidth || 600);
-
-      const height = canvas.height =
-        Math.max(50, canvas.clientHeight || 90);
-
-      analyser.getByteTimeDomainData(data);
-
-      ctx.clearRect(0, 0, width, height);
-
-      ctx.strokeStyle = "#43d9ff";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-
-      for (let i = 0; i < data.length; i++) {
-        const x = (i / data.length) * width;
-        const y = (data[i] / 255) * height;
-
-        if (i === 0) {
-          ctx.moveTo(x, y);
-        } else {
-          ctx.lineTo(x, y);
+        if (!keyboard) {
+            return;
         }
-      }
 
-      ctx.stroke();
+        keyboard.innerHTML = "";
 
-      if (state.mediaStream) {
-        requestAnimationFrame(draw);
-      }
+        const octave = getKeyboardOctave();
+        const whiteKeys = [];
 
-      try {
-        source.connect(analyser);
-      } catch (_) {
-        // Already connected.
-      }
-    };
+        for (let oct = octave; oct < octave + 2; oct++) {
+            keyboardNotes.forEach((note) => {
+                if (note.black) {
+                    return;
+                }
 
-    draw();
-  }
+                const midi = 12 * (oct + 1) + note.semitone;
+                const key = document.createElement("button");
 
-  async function addVoiceRecordingToTimeline() {
-    if (!state.currentRecordingUrl) {
-      toast("Jalqaba sagalee waraabi.");
-      return;
+                key.type = "button";
+                key.className = "piano-key white-key";
+                key.dataset.midi = String(midi);
+                key.dataset.note = note.name + oct;
+                key.textContent = note.name + oct;
+
+                attachKeyboardKeyEvents(key, midi);
+
+                whiteKeys.push(key);
+                keyboard.appendChild(key);
+            });
+        }
+
+        const blackNotes = keyboardNotes.filter(
+            (note) => note.black
+        );
+
+        let whiteIndex = 0;
+
+        for (let oct = octave; oct < octave + 2; oct++) {
+            for (let i = 0; i < keyboardNotes.length; i++) {
+                const note = keyboardNotes[i];
+
+                if (note.black) {
+                    const midi =
+                        12 * (oct + 1) + note.semitone;
+
+                    const key = document.createElement("button");
+
+                    key.type = "button";
+                    key.className = "piano-key black-key";
+                    key.dataset.midi = String(midi);
+                    key.dataset.note = note.name + oct;
+                    key.textContent = note.name;
+
+                    const precedingWhiteKeys =
+                        keyboardNotes
+                            .slice(0, i)
+                            .filter(
+                                (item) => !item.black
+                            ).length;
+
+                    const globalWhiteIndex =
+                        (oct - octave) * 7 +
+                        precedingWhiteKeys;
+
+                    key.style.left =
+                        (
+                            (globalWhiteIndex + 1) *
+                            (100 / 14) -
+                            1.6
+                        ) + "%";
+
+                    attachKeyboardKeyEvents(key, midi);
+
+                    keyboard.appendChild(key);
+                }
+            }
+        }
+
+        safeText(
+            $("keyboardStatus"),
+            "Keyboard qophaa'eera."
+        );
     }
 
-    try {
-      const response = await fetch(
-        state.currentRecordingUrl
-      );
+    function attachKeyboardKeyEvents(button, midi) {
+        const start = (event) => {
+            event.preventDefault();
 
-      const blob = await response.blob();
+            if (state.keyboardActiveNotes.has(midi)) {
+                return;
+            }
 
-      const file = new File(
-        [blob],
-        "Naol_Voice_Recording.webm",
-        { type: blob.type || "audio/webm" }
-      );
+            button.classList.add("pressed");
 
-      await importAudioFile(file, "voice");
+            const voice = playKeyboardNote(midi);
 
-      const section = $("editorSection");
+            state.keyboardActiveNotes.set(midi, voice);
 
-      if (section) {
-        showSection("editorSection");
-      }
+            if (state.keyboardRecording) {
+                state.keyboardRecordingEvents.push({
+                    type: "on",
+                    midi,
+                    time: keyboardRecordingTime()
+                });
+            }
+        };
 
-    } catch (error) {
-      console.error(error);
-      toast("Recording timeline irratti dabaluu hin dandeenye.");
-    }
-  }
+        const end = (event) => {
+            event.preventDefault();
 
-  function downloadVoiceRecording() {
-    if (!state.currentRecordingUrl) {
-      toast("Recording hin jiru.");
-      return;
-    }
+            button.classList.remove("pressed");
 
-    downloadUrl(
-      state.currentRecordingUrl,
-      "Naol_Voice_Recording.webm"
-    );
-  }
+            const voice = state.keyboardActiveNotes.get(midi);
 
-  function discardVoiceRecording() {
-    if (state.currentRecordingUrl) {
-      URL.revokeObjectURL(
-        state.currentRecordingUrl
-      );
+            if (voice) {
+                stopKeyboardNote(midi);
+            }
+        };
 
-      state.currentRecordingUrl = null;
-    }
-
-    const preview = $("recordingPreview");
-
-    if (preview) {
-      preview.removeAttribute("src");
-      preview.load();
-    }
-
-    const result = $("recordingResult");
-
-    if (result) {
-      result.classList.add("hidden");
-    }
-
-    setStatus(
-      "recordingResultStatus",
-      "No recording"
-    );
-
-    toast("Recording discarded");
-  }
-
-  /* -------------------------------------------------------
-     VIRTUAL KEYBOARD
-     ------------------------------------------------------- */
-
-  const noteNames = [
-    "C",
-    "C#",
-    "D",
-    "D#",
-    "E",
-    "F",
-    "F#",
-    "G",
-    "G#",
-    "A",
-    "A#",
-    "B"
-  ];
-
-  function midiToFrequency(midi) {
-    return 440 * Math.pow(2, (midi - 69) / 12);
-  }
-
-  function getInstrumentType() {
-    return $("instrumentSelect")?.value || "piano";
-  }
-
-  function getKeyboardOctave() {
-    return Number(
-      $("octaveSelect")?.value || 4
-    );
-  }
-
-  function renderVirtualKeyboard() {
-    const container = $("pianoKeyboard");
-
-    if (!container) return;
-
-    container.innerHTML = "";
-
-    const octave = getKeyboardOctave();
-
-    const startMidi = (octave + 1) * 12;
-
-    for (let i = 0; i < 24; i++) {
-      const midi = startMidi + i;
-      const note = noteNames[midi % 12];
-
-      const black = note.includes("#");
-
-      const button = document.createElement("button");
-
-      button.type = "button";
-
-      button.className =
-        "piano-key " +
-        (black ? "black-key" : "white-key");
-
-      button.dataset.midi = String(midi);
-
-      button.setAttribute(
-        "aria-label",
-        note + " " + Math.floor(midi / 12 - 1)
-      );
-
-      const label = document.createElement("span");
-
-      label.className = "piano-key-label";
-      label.textContent =
-        note +
-        (note.includes("#") ? "" : "");
-
-      button.appendChild(label);
-
-      button.addEventListener("pointerdown", (event) => {
-        event.preventDefault();
-
-        button.setPointerCapture?.(event.pointerId);
-
-        startKeyboardNote(midi, button);
-      });
-
-      const stopNote = () => {
-        stopKeyboardNote(midi, button);
-      };
-
-      button.addEventListener("pointerup", stopNote);
-      button.addEventListener("pointercancel", stopNote);
-      button.addEventListener("lostpointercapture", stopNote);
-
-      container.appendChild(button);
-    }
-  }
-
-  async function startKeyboardNote(midi, button) {
-    if (state.heldKeyboardNotes.has(midi)) return;
-
-    try {
-      const context = await ensureAudioContext();
-
-      const track = state.tracks.keyboard;
-
-      await ensureTrackGraph(track);
-
-      const instrument = getInstrumentType();
-
-      const oscillator = context.createOscillator();
-      const gain = context.createGain();
-
-      oscillator.frequency.value =
-        midiToFrequency(midi);
-
-      if (instrument === "bass") {
-        oscillator.type = "triangle";
-      } else if (instrument === "electric") {
-        oscillator.type = "square";
-      } else if (instrument === "synth") {
-        oscillator.type = "sawtooth";
-      } else {
-        oscillator.type = "triangle";
-      }
-
-      const now = context.currentTime;
-
-      const noteGain =
-        instrument === "bass"
-          ? 0.13
-          : instrument === "synth"
-            ? 0.09
-            : 0.12;
-
-      gain.gain.setValueAtTime(0.0001, now);
-
-      gain.gain.exponentialRampToValueAtTime(
-        noteGain,
-        now + 0.025
-      );
-
-      oscillator.connect(gain);
-      gain.connect(track.source);
-
-      oscillator.start(now);
-
-      state.heldKeyboardNotes.set(midi, {
-        oscillator,
-        gain,
-        startedAt: now,
-        button
-      });
-
-      button?.classList.add("active");
-
-      if (state.keyboardIsRecording) {
-        state.keyboardRecording.push({
-          midi,
-          start:
-            getKeyboardRecordingTime(),
-          end: null
+        button.addEventListener("pointerdown", start);
+        button.addEventListener("pointerup", end);
+        button.addEventListener("pointerleave", (event) => {
+            if (state.keyboardActiveNotes.has(midi)) {
+                end(event);
+            }
         });
-      }
 
-      setStatus(
-        "keyboardStatus",
-        "Playing " + noteNames[midi % 12]
-      );
-
-    } catch (error) {
-      console.error(error);
-      toast("Keyboard sound jalqabuu hin dandeenye.");
-    }
-  }
-
-  function stopKeyboardNote(midi, button) {
-    const note = state.heldKeyboardNotes.get(midi);
-
-    if (!note) return;
-
-    const context = state.audioContext;
-    const now = context ? context.currentTime : 0;
-
-    try {
-      const sustainEnabled =
-        $("sustainBtn")?.classList.contains("active");
-
-      const release = sustainEnabled ? 0.7 : 0.15;
-
-      note.gain.gain.cancelScheduledValues(now);
-
-      note.gain.gain.setTargetAtTime(
-        0.0001,
-        now,
-        release / 5
-      );
-
-      note.oscillator.stop(now + release);
-
-    } catch (_) {
-      // Oscillator may already have stopped.
+        button.addEventListener("pointercancel", end);
     }
 
-    const lastNote =
-      [...state.keyboardRecording]
-        .reverse()
-        .find(
-          (item) =>
-            item.midi === midi &&
-            item.end === null
-        );
-
-    if (lastNote) {
-      lastNote.end = getKeyboardRecordingTime();
-    }
-
-    state.heldKeyboardNotes.delete(midi);
-
-    button?.classList.remove("active");
-  }
-
-  function getKeyboardRecordingTime() {
-    if (!state.keyboardIsRecording) return 0;
-
-    const elapsed =
-      Date.now() -
-      state.keyboardRecordingStartedAt -
-      state.keyboardRecordingPauseTotal;
-
-    return Math.max(0, elapsed / 1000);
-  }
-
-  function stopAllKeyboardNotes() {
-    [...state.heldKeyboardNotes.keys()].forEach((midi) => {
-      const note = state.heldKeyboardNotes.get(midi);
-
-      stopKeyboardNote(midi, note?.button);
-    });
-  }
-
-  function bindComputerKeyboard() {
-    const keyMap = {
-      a: 0,
-      w: 1,
-      s: 2,
-      e: 3,
-      d: 4,
-      f: 5,
-      t: 6,
-      g: 7,
-      y: 8,
-      h: 9,
-      u: 10,
-      j: 11,
-      k: 12
-    };
-
-    const heldComputerKeys = new Map();
-
-    window.addEventListener("keydown", (event) => {
-      if (
-        event.repeat ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.altKey
-      ) {
-        return;
-      }
-
-      if (
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLSelectElement ||
-        event.target instanceof HTMLTextAreaElement
-      ) {
-        return;
-      }
-
-      const offset = keyMap[event.key.toLowerCase()];
-
-      if (offset === undefined) return;
-
-      const midi =
-        (getKeyboardOctave() + 1) * 12 + offset;
-
-      const button = $(
-        "pianoKeyboard"
-      )?.querySelector(`[data-midi="${midi}"]`);
-
-      if (heldComputerKeys.has(event.key)) return;
-
-      heldComputerKeys.set(event.key, midi);
-
-      startKeyboardNote(midi, button);
-    });
-
-    window.addEventListener("keyup", (event) => {
-      const midi = heldComputerKeys.get(event.key);
-
-      if (midi === undefined) return;
-
-      const button = $("pianoKeyboard")?.querySelector(
-        `[data-midi="${midi}"]`
-      );
-
-      stopKeyboardNote(midi, button);
-
-      heldComputerKeys.delete(event.key);
-    });
-
-    window.addEventListener("blur", () => {
-      heldComputerKeys.forEach((midi) => {
-        const button = $("pianoKeyboard")?.querySelector(
-          `[data-midi="${midi}"]`
-        );
-
-        stopKeyboardNote(midi, button);
-      });
-
-      heldComputerKeys.clear();
-    });
-  }
-
-  /* -------------------------------------------------------
-     KEYBOARD PERFORMANCE RECORDING
-     ------------------------------------------------------- */
-
-  function startKeyboardRecording() {
-    state.keyboardRecording = [];
-
-    state.keyboardRecordingStartedAt = Date.now();
-    state.keyboardRecordingPauseTotal = 0;
-
-    state.keyboardIsRecording = true;
-    state.keyboardIsPaused = false;
-
-    setStatus(
-      "keyboardStatus",
-      "Recording keyboard performance"
-    );
-
-    updateKeyboardRecordingButtons();
-
-    toast("Keyboard recording started");
-  }
-
-  function pauseKeyboardRecording() {
-    if (
-      !state.keyboardIsRecording ||
-      state.keyboardIsPaused
-    ) {
-      return;
-    }
-
-    state.keyboardIsPaused = true;
-    state.keyboardRecordingPausedAt = Date.now();
-
-    updateKeyboardRecordingButtons();
-
-    setStatus(
-      "keyboardStatus",
-      "Keyboard recording paused"
-    );
-  }
-
-  function resumeKeyboardRecording() {
-    if (
-      !state.keyboardIsRecording ||
-      !state.keyboardIsPaused
-    ) {
-      return;
-    }
-
-    state.keyboardRecordingPauseTotal +=
-      Date.now() - state.keyboardRecordingPausedAt;
-
-    state.keyboardIsPaused = false;
-
-    updateKeyboardRecordingButtons();
-
-    setStatus(
-      "keyboardStatus",
-      "Recording keyboard performance"
-    );
-  }
-
-  function stopKeyboardRecording() {
-    if (!state.keyboardIsRecording) {
-      toast("Keyboard recording hin jalqabne.");
-      return;
-    }
-
-    stopAllKeyboardNotes();
-
-    state.keyboardIsRecording = false;
-    state.keyboardIsPaused = false;
-
-    updateKeyboardRecordingButtons();
-
-    setStatus(
-      "keyboardStatus",
-      "Keyboard performance recorded"
-    );
-
-    toast("Keyboard performance saved in memory");
-  }
-
-  function updateKeyboardRecordingButtons() {
-    const recording = state.keyboardIsRecording;
-    const paused = state.keyboardIsPaused;
-
-    const start = $("recordKeyboardBtn");
-    const pause = $("pauseKeyboardBtn");
-    const resume = $("resumeKeyboardBtn");
-    const stop = $("stopKeyboardBtn");
-
-    if (start) start.disabled = recording;
-    if (pause) pause.disabled = !recording || paused;
-    if (resume) resume.disabled = !recording || !paused;
-    if (stop) stop.disabled = !recording;
-  }
-
-  function synthesizeKeyboardPerformance() {
-    const notes = state.keyboardRecording.filter(
-      (note) =>
-        Number.isFinite(note.midi) &&
-        Number.isFinite(note.start)
-    );
-
-    if (notes.length === 0) {
-      toast("Keyboard recording keessatti note hin jiru.");
-      return null;
-    }
-
-    const sampleRate = 44100;
-
-    const duration = Math.max(
-      0.5,
-      ...notes.map((note) =>
-        Math.max(
-          note.start + 0.25,
-          (note.end ?? note.start + 0.5)
-        )
-      )
-    ) + 0.5;
-
-    const frames = Math.ceil(duration * sampleRate);
-
-    const left = new Float32Array(frames);
-    const right = new Float32Array(frames);
-
-    notes.forEach((note) => {
-      const start = Math.floor(
-        note.start * sampleRate
-      );
-
-      const end = Math.floor(
-        Math.max(
-          note.start + 0.12,
-          note.end ?? note.start + 0.5
-        ) * sampleRate
-      );
-
-      const frequency = midiToFrequency(note.midi);
-
-      const attack = Math.floor(sampleRate * 0.015);
-      const release = Math.floor(sampleRate * 0.12);
-
-      const actualEnd = Math.min(frames, end + release);
-
-      for (let i = start; i < actualEnd; i++) {
-        const local = i - start;
-
-        let envelope = 1;
-
-        if (local < attack) {
-          envelope = local / attack;
+    function playKeyboardNote(midi) {
+        const context = ensureAudioContext();
+
+        if (!context) {
+            return null;
         }
 
-        if (i > end) {
-          envelope = Math.min(
-            envelope,
-            Math.max(0, 1 - (i - end) / release)
-          );
+        const frequency = midiToFrequency(midi);
+        const instrument = getKeyboardInstrument();
+        const gain = context.createGain();
+        const oscillator = context.createOscillator();
+
+        const volume = getKeyboardVolume();
+
+        oscillator.frequency.value = frequency;
+
+        if (instrument === "electric") {
+            oscillator.type = "triangle";
+        } else if (instrument === "bass") {
+            oscillator.type = "sawtooth";
+            oscillator.frequency.value = frequency / 2;
+        } else if (instrument === "synth") {
+            oscillator.type = "sawtooth";
+        } else {
+            oscillator.type = "sine";
         }
 
-        const time = local / sampleRate;
-
-        const sample =
-          (
-            Math.sin(2 * Math.PI * frequency * time) * 0.65 +
-            Math.sin(4 * Math.PI * frequency * time) * 0.18 +
-            Math.sin(6 * Math.PI * frequency * time) * 0.06
-          ) *
-          envelope *
-          0.22;
-
-        left[i] += sample;
-        right[i] += sample;
-      }
-    });
-
-    return createWavBlob(left, right, sampleRate);
-  }
-
-  async function playKeyboardRecording() {
-    const blob = synthesizeKeyboardPerformance();
-
-    if (!blob) return;
-
-    if (state.currentKeyboardUrl) {
-      URL.revokeObjectURL(state.currentKeyboardUrl);
-    }
-
-    state.currentKeyboardUrl = URL.createObjectURL(blob);
-
-    const audio = new Audio(state.currentKeyboardUrl);
-
-    audio.play().catch((error) => {
-      console.error(error);
-      toast("Keyboard recording play hin taane.");
-    });
-  }
-
-  async function addKeyboardRecordingToTimeline() {
-    const blob = synthesizeKeyboardPerformance();
-
-    if (!blob) return;
-
-    const file = new File(
-      [blob],
-      "Naol_Keyboard_Performance.wav",
-      { type: "audio/wav" }
-    );
-
-    await importAudioFile(file, "keyboard");
-
-    showSection("editorSection");
-  }
-
-  function downloadKeyboardRecording() {
-    const blob = synthesizeKeyboardPerformance();
-
-    if (!blob) return;
-
-    downloadBlob(
-      blob,
-      "Naol_Keyboard_Performance.wav"
-    );
-  }
-
-  /* -------------------------------------------------------
-     WAV ENCODER
-     ------------------------------------------------------- */
-
-  function createWavBlob(left, right, sampleRate = 44100) {
-    const channels = right ? 2 : 1;
-
-    const length = left.length;
-    const bytesPerSample = 2;
-
-    const blockAlign = channels * bytesPerSample;
-    const dataSize = length * blockAlign;
-
-    const buffer = new ArrayBuffer(44 + dataSize);
-    const view = new DataView(buffer);
-
-    function writeString(offset, text) {
-      for (let i = 0; i < text.length; i++) {
-        view.setUint8(offset + i, text.charCodeAt(i));
-      }
-    }
-
-    writeString(0, "RIFF");
-    view.setUint32(4, 36 + dataSize, true);
-    writeString(8, "WAVE");
-    writeString(12, "fmt ");
-    view.setUint32(16, 16, true);
-    view.setUint16(20, 1, true);
-    view.setUint16(22, channels, true);
-    view.setUint32(24, sampleRate, true);
-    view.setUint32(
-      28,
-      sampleRate * blockAlign,
-      true
-    );
-    view.setUint16(32, blockAlign, true);
-    view.setUint16(34, 16, true);
-    writeString(36, "data");
-    view.setUint32(40, dataSize, true);
-
-    let offset = 44;
-
-    for (let i = 0; i < length; i++) {
-      const l = clamp(left[i] || 0, -1, 1);
-
-      view.setInt16(
-        offset,
-        l < 0
-          ? l * 32768
-          : l * 32767,
-        true
-      );
-
-      offset += 2;
-
-      if (channels === 2) {
-        const r = clamp(right[i] || 0, -1, 1);
-
-        view.setInt16(
-          offset,
-          r < 0
-            ? r * 32768
-            : r * 32767,
-          true
+        gain.gain.setValueAtTime(
+            0.0001,
+            context.currentTime
         );
 
-        offset += 2;
-      }
-    }
-
-    return new Blob(
-      [buffer],
-      { type: "audio/wav" }
-    );
-  }
-
-  /* -------------------------------------------------------
-     OFFLINE AUDIO MIX / EXPORT
-     ------------------------------------------------------- */
-
-  async function renderOfflineMix() {
-    const tracks = Object.values(state.tracks).filter(
-      (track) => hasAudio(track)
-    );
-
-    if (tracks.length === 0) {
-      throw new Error(
-        "Jalqaba audio track tokko ol fe'i."
-      );
-    }
-
-    const duration = getProjectDuration();
-
-    if (duration <= 0) {
-      throw new Error("Audio duration sirrii miti.");
-    }
-
-    const sampleRate = Number(
-      $("exportSampleRate")?.value || 44100
-    );
-
-    const channels =
-      $("exportChannels")?.value === "mono"
-        ? 1
-        : 2;
-
-    const frames = Math.ceil(duration * sampleRate);
-
-    const left = new Float32Array(frames);
-    const right =
-      channels === 2
-        ? new Float32Array(frames)
-        : null;
-
-    const masterVolume = state.masterVolume;
-
-    const settings = {
-      bass: Number($("bassControl")?.value || 0),
-      mid: Number($("midControl")?.value || 0),
-      treble: Number($("trebleControl")?.value || 0),
-      distortion: Number(
-        $("distortionControl")?.value || 0
-      ),
-      delay: Number($("delayControl")?.value || 0),
-      reverb: Number($("reverbControl")?.value || 0),
-      fadeIn: Number($("fadeInControl")?.value || 0),
-      fadeOut: Number($("fadeOutControl")?.value || 0)
-    };
-
-    const anySolo = tracks.some((track) => track.solo);
-
-    for (const track of tracks) {
-      if (track.muted || (anySolo && !track.solo)) {
-        continue;
-      }
-
-      const buffer = track.audio.buffer;
-
-      const leftChannel = buffer.getChannelData(0);
-
-      const rightChannel =
-        buffer.numberOfChannels > 1
-          ? buffer.getChannelData(1)
-          : leftChannel;
-
-      const volume = clamp(
-        track.volume,
-        0,
-        1.5
-      );
-
-      const pan = clamp(
-        track.panValue,
-        -1,
-        1
-      );
-
-      const panLeft = Math.cos(
-        (pan + 1) * Math.PI / 4
-      );
-
-      const panRight = Math.sin(
-        (pan + 1) * Math.PI / 4
-      );
-
-      const startTime = track.trimStart || 0;
-
-      const endTime =
-        track.trimEnd ?? buffer.duration;
-
-      const trackDuration = Math.max(
-        0,
-        endTime - startTime
-      );
-
-      const startFrame = 0;
-
-      const framesForTrack = Math.min(
-        frames,
-        Math.ceil(trackDuration * sampleRate)
-      );
-
-      const bassGain = Math.pow(
-        10,
-        settings.bass / 20
-      );
-
-      const midGain = Math.pow(
-        10,
-        settings.mid / 20
-      );
-
-      const trebleGain = Math.pow(
-        10,
-        settings.treble / 20
-      );
-
-      let previousX = 0;
-      let previousY = 0;
-
-      for (let i = startFrame; i < framesForTrack; i++) {
-        const sourceTime =
-          startTime + i / sampleRate;
-
-        const sourceIndex = Math.floor(
-          sourceTime * buffer.sampleRate
+        gain.gain.exponentialRampToValueAtTime(
+            Math.max(0.0002, volume * 0.3),
+            context.currentTime + 0.025
         );
 
-        if (sourceIndex >= leftChannel.length) {
-          break;
+        oscillator.connect(gain);
+        gain.connect(state.masterGain);
+
+        oscillator.start();
+
+        return {
+            oscillator,
+            gain,
+            midi,
+            released: false
+        };
+    }
+
+    function stopKeyboardNote(midi) {
+        const voice = state.keyboardActiveNotes.get(midi);
+
+        if (!voice || !state.audioContext) {
+            return;
         }
 
-        let sampleL = leftChannel[sourceIndex];
-        let sampleR = rightChannel[sourceIndex];
+        state.keyboardActiveNotes.delete(midi);
 
-        /*
-          Simple offline tone shaping.
-          Live playback uses the Web Audio filter chain.
-        */
-
-        const bassFiltered =
-          sampleL * (bassGain > 1 ? bassGain : 1);
-
-        const trebleFiltered =
-          sampleR * (trebleGain > 1 ? trebleGain : 1);
-
-        sampleL =
-          sampleL * 0.7 +
-          bassFiltered * 0.15 +
-          sampleL * midGain * 0.15;
-
-        sampleR =
-          sampleR * 0.7 +
-          trebleFiltered * 0.15 +
-          sampleR * midGain * 0.15;
-
-        if (settings.distortion > 0) {
-          const drive =
-            1 + settings.distortion / 12;
-
-          sampleL = Math.tanh(sampleL * drive);
-          sampleR = Math.tanh(sampleR * drive);
+        if (state.keyboardRecording) {
+            state.keyboardRecordingEvents.push({
+                type: "off",
+                midi,
+                time: keyboardRecordingTime()
+            });
         }
 
-        /*
-          Fade in/out is applied according to each track's
-          duration, so exported audio follows the fade controls.
-        */
+        const now = state.audioContext.currentTime;
 
-        if (settings.fadeIn > 0) {
-          const fadeInGain = clamp(
-            (i / sampleRate) / settings.fadeIn,
+        try {
+            voice.gain.gain.cancelScheduledValues(now);
+
+            voice.gain.gain.setTargetAtTime(
+                0.0001,
+                now,
+                0.04
+            );
+
+            voice.oscillator.stop(now + 0.2);
+        } catch (_) {}
+    }
+
+    function keyboardRecordingTime() {
+        if (!state.keyboardRecording) {
+            return 0;
+        }
+
+        const now = state.keyboardPaused
+            ? state.keyboardRecordingPausedAt
+            : performance.now();
+
+        return Math.max(
             0,
-            1
-          );
+            (
+                now -
+                state.keyboardRecordingStart -
+                state.keyboardRecordingPauseTotal
+            ) / 1000
+        );
+    }
 
-          sampleL *= fadeInGain;
-          sampleR *= fadeInGain;
+    function startKeyboardRecording() {
+        state.keyboardRecordingEvents = [];
+        state.keyboardRecordingStart = performance.now();
+        state.keyboardRecordingPauseTotal = 0;
+        state.keyboardPaused = false;
+        state.keyboardRecording = true;
+
+        safeText(
+            $("keyboardStatus"),
+            "Keyboard recording..."
+        );
+
+        setButtonEnabled("recordKeyboardBtn", false);
+        setButtonEnabled("pauseKeyboardBtn", true);
+        setButtonEnabled("resumeKeyboardBtn", false);
+        setButtonEnabled("stopKeyboardBtn", true);
+
+        clearInterval(state.keyboardTimer);
+
+        state.keyboardTimer = setInterval(() => {
+            if (state.keyboardRecording) {
+                safeText(
+                    $("recordingTimer"),
+                    formatTime(keyboardRecordingTime())
+                );
+            }
+        }, 100);
+    }
+
+    function pauseKeyboardRecording() {
+        if (!state.keyboardRecording || state.keyboardPaused) {
+            return;
         }
 
-        if (settings.fadeOut > 0) {
-          const remaining =
-            trackDuration - i / sampleRate;
+        state.keyboardRecordingPausedAt = performance.now();
+        state.keyboardPaused = true;
 
-          const fadeOutGain = clamp(
-            remaining / settings.fadeOut,
-            0,
-            1
-          );
+        safeText(
+            $("keyboardStatus"),
+            "Keyboard recording paused."
+        );
 
-          sampleL *= fadeOutGain;
-          sampleR *= fadeOutGain;
+        setButtonEnabled("pauseKeyboardBtn", false);
+        setButtonEnabled("resumeKeyboardBtn", true);
+    }
+
+    function resumeKeyboardRecording() {
+        if (!state.keyboardRecording || !state.keyboardPaused) {
+            return;
         }
 
-        /*
-          Add a light echo approximation to the mix.
-        */
+        state.keyboardRecordingPauseTotal +=
+            performance.now() -
+            state.keyboardRecordingPausedAt;
 
-        const echoFrames = Math.floor(
-          (0.15 + settings.delay * 0.004) *
-          sampleRate
+        state.keyboardPaused = false;
+
+        safeText(
+            $("keyboardStatus"),
+            "Keyboard recording..."
         );
 
-        let echoL = 0;
-        let echoR = 0;
+        setButtonEnabled("pauseKeyboardBtn", true);
+        setButtonEnabled("resumeKeyboardBtn", false);
+    }
 
-        if (settings.delay > 0 && i > echoFrames) {
-          echoL =
-            left[i - echoFrames] *
-            (settings.delay / 100) *
-            0.25;
-
-          if (right) {
-            echoR =
-              right[i - echoFrames] *
-              (settings.delay / 100) *
-              0.25;
-          }
+    function stopKeyboardRecording() {
+        if (!state.keyboardRecording) {
+            return;
         }
 
-        const targetIndex = Math.floor(
-          (i / sampleRate) * sampleRate
-        );
+        state.keyboardRecording = false;
+        state.keyboardPaused = false;
 
-        if (targetIndex >= frames) break;
+        clearInterval(state.keyboardTimer);
 
-        left[targetIndex] +=
-          (sampleL * panLeft * volume + echoL) *
-          masterVolume;
-
-        if (right) {
-          right[targetIndex] +=
-            (sampleR * panRight * volume + echoR) *
-            masterVolume;
+        for (const midi of state.keyboardActiveNotes.keys()) {
+            stopKeyboardNote(midi);
         }
 
-        previousX = sampleL;
-        previousY = sampleR;
-      }
+        safeText(
+            $("keyboardStatus"),
+            "Keyboard recording xumurame."
+        );
+
+        setButtonEnabled("recordKeyboardBtn", true);
+        setButtonEnabled("pauseKeyboardBtn", false);
+        setButtonEnabled("resumeKeyboardBtn", false);
+        setButtonEnabled("stopKeyboardBtn", false);
     }
 
-    /*
-      Optional peak normalization.
-    */
+    async function createKeyboardRecordingBuffer() {
+        const events = state.keyboardRecordingEvents.slice();
 
-    if ($("normalizeExport")?.checked) {
-      let peak = 0;
-
-      for (let i = 0; i < frames; i++) {
-        peak = Math.max(
-          peak,
-          Math.abs(left[i]),
-          right ? Math.abs(right[i]) : 0
-        );
-      }
-
-      if (peak > 0) {
-        const normalizationGain = 0.98 / peak;
-
-        for (let i = 0; i < frames; i++) {
-          left[i] *= normalizationGain;
-
-          if (right) {
-            right[i] *= normalizationGain;
-          }
+        if (events.length === 0) {
+            showToast("Keyboard note hin waraabamne.");
+            return null;
         }
-      }
-    } else {
-      /*
-        Soft safety limiter to prevent harsh clipping.
-      */
 
-      for (let i = 0; i < frames; i++) {
-        left[i] = Math.tanh(left[i]);
+        const sampleRate = 44100;
 
-        if (right) {
-          right[i] = Math.tanh(right[i]);
+        const duration = Math.max(
+            1,
+            ...events.map((event) => event.time)
+        ) + 1;
+
+        const frameCount = Math.ceil(
+            duration * sampleRate
+        );
+
+        const OfflineContext =
+            window.OfflineAudioContext ||
+            window.webkitOfflineAudioContext;
+
+        if (!OfflineContext) {
+            showToast(
+                "Offline audio render browser kana keessatti hin deeggaramu."
+            );
+
+            return null;
         }
-      }
-    }
 
-    return createWavBlob(left, right, sampleRate);
-  }
-
-  async function exportAudio() {
-    const button = $("exportBtn");
-
-    if (button) {
-      button.disabled = true;
-      button.textContent = "Rendering...";
-    }
-
-    const progressWrap = $("exportProgressWrap");
-
-    if (progressWrap) {
-      progressWrap.classList.add("visible");
-    }
-
-    setStatus("exportStatus", "Rendering audio mix...");
-
-    updateExportProgress(5, "Preparing audio...");
-
-    try {
-      await new Promise((resolve) =>
-        setTimeout(resolve, 30)
-      );
-
-      updateExportProgress(20, "Mixing tracks...");
-
-      const blob = await renderOfflineMix();
-
-      updateExportProgress(90, "Preparing WAV file...");
-
-      state.exportBlob = blob;
-
-      if (state.currentExportUrl) {
-        URL.revokeObjectURL(state.currentExportUrl);
-      }
-
-      state.currentExportUrl =
-        URL.createObjectURL(blob);
-
-      updateExportProgress(100, "Export complete");
-
-      const format = $("exportFormat")?.value || "wav";
-
-      if (format === "mp3") {
-        setStatus(
-          "exportStatus",
-          "MP3 encoder is unavailable. Exported a WAV file instead."
+        const offline = new OfflineContext(
+            2,
+            frameCount,
+            sampleRate
         );
 
-        toast(
-          "MP3 encoder hin jiru; WAV dhugaa export godhame."
+        const active = new Map();
+
+        events.forEach((event) => {
+            const time = clamp(
+                event.time,
+                0,
+                duration
+            );
+
+            if (event.type === "on") {
+                const oscillator = offline.createOscillator();
+                const gain = offline.createGain();
+
+                oscillator.type =
+                    getKeyboardInstrument() === "piano"
+                        ? "sine"
+                        : "triangle";
+
+                oscillator.frequency.value =
+                    midiToFrequency(event.midi);
+
+                gain.gain.setValueAtTime(
+                    0.0001,
+                    time
+                );
+
+                gain.gain.linearRampToValueAtTime(
+                    getKeyboardVolume() * 0.3,
+                    time + 0.02
+                );
+
+                oscillator.connect(gain);
+                gain.connect(offline.destination);
+
+                oscillator.start(time);
+
+                active.set(event.midi, {
+                    oscillator,
+                    gain
+                });
+            } else {
+                const voice = active.get(event.midi);
+
+                if (!voice) {
+                    return;
+                }
+
+                voice.gain.gain.setTargetAtTime(
+                    0.0001,
+                    time,
+                    0.03
+                );
+
+                try {
+                    voice.oscillator.stop(time + 0.2);
+                } catch (_) {}
+
+                active.delete(event.midi);
+            }
+        });
+
+        active.forEach((voice) => {
+            try {
+                voice.gain.gain.setTargetAtTime(
+                    0.0001,
+                    duration - 0.2,
+                    0.03
+                );
+
+                voice.oscillator.stop(duration);
+            } catch (_) {}
+        });
+
+        return await offline.startRendering();
+    }
+
+    async function useKeyboardRecording() {
+        const buffer = await createKeyboardRecordingBuffer();
+
+        if (!buffer) {
+            return;
+        }
+
+        state.keyboardAudioBuffer = buffer;
+
+        const track = createTrack({
+            name: "Keyboard Recording",
+            type: "keyboard",
+            buffer
+        });
+
+        selectTrack(track.id);
+
+        showToast(
+            "Keyboard recording timeline irratti dabalame."
         );
-      } else {
-        setStatus(
-          "exportStatus",
-          "WAV export complete"
+    }
+
+    async function downloadKeyboardRecording() {
+        const buffer = await createKeyboardRecordingBuffer();
+
+        if (!buffer) {
+            return;
+        }
+
+        const wav = audioBufferToWav(buffer);
+
+        downloadBlob(
+            wav,
+            "naol-keyboard-recording.wav"
         );
-
-        toast("Audio export milkaa'e.");
-      }
-
-      const downloadButton = $("downloadExportBtn");
-
-      if (downloadButton) {
-        downloadButton.disabled = false;
-      }
-
-      setSaveStatus("Export ready");
-
-    } catch (error) {
-      console.error(error);
-
-      setStatus(
-        "exportStatus",
-        error.message || "Export failed"
-      );
-
-      toast(
-        error.message || "Audio export hin milkoofne."
-      );
-
-    } finally {
-      if (button) {
-        button.disabled = false;
-        button.textContent = "Export Audio";
-      }
-    }
-  }
-
-  function updateExportProgress(percent, message) {
-    const value = clamp(percent, 0, 100);
-
-    setStatus("exportProgressText", message);
-    setStatus("exportProgressPercent", value + "%");
-
-    const progress = $("exportProgress");
-
-    if (progress) {
-      progress.style.width = value + "%";
-    }
-  }
-
-  function downloadExport() {
-    if (!state.exportBlob) {
-      toast("Jalqaba export audio godhi.");
-      return;
     }
 
-    const filename =
-      ($("exportFileName")?.value || "Naol_Mix")
-        .trim()
-        .replace(/[<>:"/\\|?*]+/g, "_") ||
-      "Naol_Mix";
+    async function playKeyboardRecording() {
+        const buffer = await createKeyboardRecordingBuffer();
 
-    /*
-      The output is WAV even if MP3 was requested
-      but no MP3 encoder is installed.
-    */
+        if (!buffer) {
+            return;
+        }
 
-    downloadBlob(
-      state.exportBlob,
-      filename + ".wav"
-    );
-  }
+        const track = createTrack({
+            name: "Keyboard Preview",
+            type: "keyboard",
+            buffer
+        });
 
-  /* -------------------------------------------------------
-     DOWNLOAD HELPERS
-     ------------------------------------------------------- */
-
-  function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-
-    downloadUrl(url, filename);
-
-    setTimeout(() => {
-      URL.revokeObjectURL(url);
-    }, 15000);
-  }
-
-  function downloadUrl(url, filename) {
-    const link = document.createElement("a");
-
-    link.href = url;
-    link.download = filename;
-
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  }
-
-  /* -------------------------------------------------------
-     TRACK EDITING
-     ------------------------------------------------------- */
-
-  function splitSelectedTrack() {
-    const track = getSelectedTrack();
-
-    if (!hasAudio(track)) {
-      toast("Audio track tokko filadhu.");
-      return;
+        selectTrack(track.id);
+        playAllTracks(0);
     }
 
-    const splitAt = state.playStartOffset;
-
-    const start = track.trimStart;
-    const end = track.trimEnd ?? track.duration;
-
-    if (
-      splitAt <= 0 ||
-      splitAt >= end - start
-    ) {
-      toast(
-        "Split gochuuf playhead audio gidduutti kaa'i."
-      );
-      return;
-    }
-
-    /*
-      The current single-track model retains the left portion.
-      The full decoded buffer remains available for export.
-      The right portion can be selected by adjusting trim start.
-    */
-
-    track.trimEnd = start + splitAt;
-
-    updateTimeline();
-    updateAudioInformation();
-
-    saveUndoState();
-
-    toast(
-      "Audio segment qoodame. Kutaa itti aanuuf trim start sirreessi."
-    );
-  }
-
-  function trimTrackStart() {
-    const track = getSelectedTrack();
-
-    if (!hasAudio(track)) {
-      toast("Jalqaba audio upload godhi.");
-      return;
-    }
-
-    const offset = state.playStartOffset;
-
-    const absoluteTime =
-      track.trimStart + offset;
-
-    const end = track.trimEnd ?? track.duration;
-
-    if (absoluteTime >= end) {
-      toast("Trim start iddoo sirrii miti.");
-      return;
-    }
-
-    track.trimStart = clamp(
-      absoluteTime,
-      0,
-      end
-    );
-
-    state.playStartOffset = 0;
-
-    updateTimeline();
-    updateAudioInformation();
-
-    saveUndoState();
-
-    toast("Audio start trimmed");
-  }
-
-  function trimTrackEnd() {
-    const track = getSelectedTrack();
-
-    if (!hasAudio(track)) {
-      toast("Jalqaba audio upload godhi.");
-      return;
-    }
-
-    const absoluteTime =
-      track.trimStart + state.playStartOffset;
-
-    if (absoluteTime <= track.trimStart) {
-      toast("Playhead gara dhuma audio geessi.");
-      return;
-    }
-
-    track.trimEnd = clamp(
-      absoluteTime,
-      track.trimStart,
-      track.duration
-    );
-
-    updateTimeline();
-    updateAudioInformation();
-
-    saveUndoState();
-
-    toast("Audio end trimmed");
-  }
-
-  function deleteSelectedAudio() {
-    const track = getSelectedTrack();
-
-    if (!hasAudio(track)) {
-      toast("Audio delete gochuuf hin jiru.");
-      return;
-    }
-
-    track.audio = null;
-    track.waveform = null;
-    track.duration = 0;
-    track.trimStart = 0;
-    track.trimEnd = null;
-    track.startOffset = 0;
-    track.name =
-      track.type === "music"
-        ? "Music Track"
-        : track.type === "voice"
-          ? "Voice Track"
-          : "Keyboard Track";
-
-    if (track.audioElement) {
-      try {
-        track.audioElement.stop();
-      } catch (_) {
-        // Already stopped.
-      }
-
-      track.audioElement = null;
-    }
-
-    updateTimeline();
-    updateAudioInformation();
-
-    saveUndoState();
-
-    toast("Selected audio deleted");
-  }
-
-  function selectTrack(type) {
-    if (!state.tracks[type]) return;
-
-    state.selectedTrack = type;
-
-    updateAudioInformation();
-
-    drawTrackWaveform(type);
-
-    updateTimeline();
-
-    setStatus(
-      "currentTrackTitle",
-      state.tracks[type].name
-    );
-  }
-
-  function addEmptyTrack() {
-    const availableTypes = [
-      "music",
-      "voice",
-      "keyboard"
-    ];
-
-    const emptyType = availableTypes.find(
-      (type) => !hasAudio(state.tracks[type])
-    );
-
-    if (emptyType) {
-      selectTrack(emptyType);
-
-      toast(
-        emptyType + " track filatame. Amma audio itti fe'i."
-      );
-    } else {
-      toast(
-        "Track sadan isaanii jiru. Track tokko qulqulleessi."
-      );
-    }
-  }
-
-  /* -------------------------------------------------------
-     UNDO / REDO
-     ------------------------------------------------------- */
-
-  function getSnapshot() {
-    return {
-      selectedTrack: state.selectedTrack,
-      masterVolume: state.masterVolume,
-
-      tracks: Object.fromEntries(
-        Object.entries(state.tracks).map(([type, track]) => [
-          type,
-          {
-            name: track.name,
-            volume: track.volume,
-            panValue: track.panValue,
-            muted: track.muted,
-            solo: track.solo,
-            trimStart: track.trimStart,
-            trimEnd: track.trimEnd,
-            duration: track.duration
-          }
-        ])
-      ),
-
-      controls: {
-        volumeControl: $("volumeControl")?.value,
-        bassControl: $("bassControl")?.value,
-        midControl: $("midControl")?.value,
-        trebleControl: $("trebleControl")?.value,
-        panControl: $("panControl")?.value,
-        reverbControl: $("reverbControl")?.value,
-        delayControl: $("delayControl")?.value,
-        distortionControl: $("distortionControl")?.value,
-        fadeInControl: $("fadeInControl")?.value,
-        fadeOutControl: $("fadeOutControl")?.value
-      }
-    };
-  }
-
-  function saveUndoState() {
-    try {
-      const snapshot = getSnapshot();
-
-      state.undoStack.push(
-        JSON.stringify(snapshot)
-      );
-
-      if (state.undoStack.length > 40) {
-        state.undoStack.shift();
-      }
-
-      state.redoStack.length = 0;
-    } catch (error) {
-      console.warn("Could not save undo state", error);
-    }
-  }
-
-  function restoreSnapshot(json) {
-    let snapshot;
-
-    try {
-      snapshot = JSON.parse(json);
-    } catch (_) {
-      return;
-    }
-
-    state.selectedTrack =
-      snapshot.selectedTrack || "music";
-
-    state.masterVolume =
-      snapshot.masterVolume ?? 0.8;
-
-    Object.entries(snapshot.tracks || {}).forEach(
-      ([type, saved]) => {
-        const track = state.tracks[type];
-
-        if (!track) return;
-
-        track.name = saved.name;
-        track.volume = saved.volume;
-        track.panValue = saved.panValue;
-        track.muted = saved.muted;
-        track.solo = saved.solo;
-        track.trimStart = saved.trimStart;
-        track.trimEnd = saved.trimEnd;
-      }
-    );
-
-    Object.entries(snapshot.controls || {}).forEach(
-      ([id, value]) => {
-        const input = $(id);
-
-        if (!input || value === undefined) return;
-
-        input.value = value;
-
-        input.dispatchEvent(
-          new Event("input", { bubbles: true })
-        );
-      }
-    );
-
-    applyAllTrackSettings();
-    updateTrackMuteSoloGains();
-    updateTimeline();
-    updateAudioInformation();
-  }
-
-  function undo() {
-    if (state.undoStack.length <= 1) {
-      toast("Undo history hin jiru.");
-      return;
-    }
-
-    const current = state.undoStack.pop();
-
-    state.redoStack.push(current);
-
-    restoreSnapshot(
-      state.undoStack[state.undoStack.length - 1]
-    );
-
-    toast("Undo");
-  }
-
-  function redo() {
-    if (state.redoStack.length === 0) {
-      toast("Redo history hin jiru.");
-      return;
-    }
-
-    const snapshot = state.redoStack.pop();
-
-    state.undoStack.push(snapshot);
-
-    restoreSnapshot(snapshot);
-
-    toast("Redo");
-  }
-
-  /* -------------------------------------------------------
-     PROJECT SAVE / BACKUP / RESTORE
-     ------------------------------------------------------- */
-
-  function saveProject() {
-    const project = {
-      app: "Naol Music Studio 3D",
-      version: 1,
-      savedAt: new Date().toISOString(),
-      projectName:
-        $("projectName")?.value ||
-        state.projectName,
-
-      settings: getSnapshot(),
-
-      tracks: Object.fromEntries(
-        Object.entries(state.tracks).map(([type, track]) => [
-          type,
-          {
-            name: track.name,
-            volume: track.volume,
-            panValue: track.panValue,
-            muted: track.muted,
-            solo: track.solo,
-            trimStart: track.trimStart,
-            trimEnd: track.trimEnd,
-            duration: track.duration
-          }
-        ])
-      )
+    /* =====================================================
+       12. PRESETS
+       ===================================================== */
+
+    const presets = {
+        clean: {
+            bass: 0,
+            mid: 0,
+            treble: 0,
+            reverb: 0,
+            delay: 0,
+            distortion: 0,
+            volume: 100
+        },
+
+        warm: {
+            bass: 4,
+            mid: 1,
+            treble: -2,
+            reverb: 15,
+            delay: 4,
+            distortion: 0,
+            volume: 95
+        },
+
+        bright: {
+            bass: -1,
+            mid: 1,
+            treble: 5,
+            reverb: 8,
+            delay: 0,
+            distortion: 0,
+            volume: 100
+        },
+
+        rap: {
+            bass: 5,
+            mid: -1,
+            treble: 3,
+            reverb: 4,
+            delay: 2,
+            distortion: 8,
+            volume: 95
+        },
+
+        gospel: {
+            bass: 2,
+            mid: 1,
+            treble: 3,
+            reverb: 35,
+            delay: 12,
+            distortion: 0,
+            volume: 95
+        },
+
+        studio: {
+            bass: 2,
+            mid: 0,
+            treble: 2,
+            reverb: 10,
+            delay: 3,
+            distortion: 0,
+            volume: 100
+        }
     };
 
-    try {
-      localStorage.setItem(
-        "naolMusicStudioProject",
-        JSON.stringify(project)
-      );
-
-      setSaveStatus("Project saved");
-
-      toast(
-        "Project settings browser memory keessatti olkaa'aman."
-      );
-
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        "Project save hin milkoofne. Storage daangeffamuu danda'a."
-      );
-    }
-  }
-
-  function backupProject() {
-    const project = {
-      app: "Naol Music Studio 3D",
-      version: 1,
-      savedAt: new Date().toISOString(),
-      projectName:
-        $("projectName")?.value ||
-        state.projectName,
-
-      snapshot: getSnapshot(),
-
-      note:
-        "This backup stores project settings, not the original audio files."
-    };
-
-    const blob = new Blob(
-      [JSON.stringify(project, null, 2)],
-      { type: "application/json" }
-    );
-
-    downloadBlob(
-      blob,
-      "Naol_Music_Studio_Project.json"
-    );
-
-    toast(
-      "Project backup buufame. Audio files addatti olkaa'i."
-    );
-  }
-
-  async function restoreProjectFile(file) {
-    if (!file) return;
-
-    try {
-      const textContent = await file.text();
-      const project = JSON.parse(textContent);
-
-      const snapshot =
-        project.snapshot ||
-        project.settings;
-
-      if (!snapshot) {
-        throw new Error("Project backup format sirrii miti.");
-      }
-
-      restoreSnapshot(
-        JSON.stringify(snapshot)
-      );
-
-      if (project.projectName && $("projectName")) {
-        $("projectName").value = project.projectName;
-      }
-
-      saveProject();
-
-      toast(
-        "Project settings restore godhame. Audio files addatti upload godhi."
-      );
-
-    } catch (error) {
-      console.error(error);
-
-      toast(
-        "Project backup dubbisuu hin dandeenye."
-      );
-    }
-  }
-
-  /* -------------------------------------------------------
-     SECTION NAVIGATION
-     ------------------------------------------------------- */
-
-  function showSection(sectionId) {
-    const section = $(sectionId);
-
-    if (!section) {
-      toast("Section hin argamne: " + sectionId);
-      return;
-    }
-
-    $$(".workspace-section").forEach((item) => {
-      item.classList.remove("active-section");
-    });
-
-    section.classList.add("active-section");
-
-    $$(".nav-item").forEach((item) => {
-      item.classList.toggle(
-        "active",
-        item.dataset.section === sectionId
-      );
-    });
-
-    if (sectionId === "editorSection") {
-      requestAnimationFrame(() => {
-        drawAllWaveforms();
-        updateTimeline();
-      });
-    }
-
-    if (sectionId === "keyboardSection") {
-      renderVirtualKeyboard();
-    }
-
-    if (sectionId === "mixerSection") {
-      updateMixerMeters();
-    }
-
-    if (sectionId === "exportSection") {
-      updateExportSummary();
-    }
-  }
-
-  function bindNavigation() {
-    $$(".nav-item").forEach((button) => {
-      button.addEventListener("click", () => {
-        const sectionId = button.dataset.section;
-
-        if (sectionId) {
-          showSection(sectionId);
-        }
-      });
-    });
-  }
-
-  /* -------------------------------------------------------
-     MIXER METERS / ANALYSIS
-     ------------------------------------------------------- */
-
-  function drawVisualizer() {
-    const canvas = $("visualizer");
-
-    if (!canvas || !state.masterAnalyser) return;
-
-    const ctx = canvas.getContext("2d");
-
-    if (!ctx) return;
-
-    const width = canvas.width =
-      Math.max(300, canvas.clientWidth || 600);
-
-    const height = canvas.height =
-      Math.max(60, canvas.clientHeight || 115);
-
-    const analyser = state.masterAnalyser;
-
-    const data = new Uint8Array(
-      analyser.frequencyBinCount
-    );
-
-    analyser.getByteFrequencyData(data);
-
-    ctx.clearRect(0, 0, width, height);
-
-    const bars = 64;
-    const barWidth = width / bars;
-
-    for (let i = 0; i < bars; i++) {
-      const index = Math.floor(
-        (i / bars) * data.length
-      );
-
-      const value = data[index] / 255;
-
-      const barHeight = Math.max(
-        2,
-        value * height * 0.88
-      );
-
-      const hue = 245 + i * 1.1;
-
-      ctx.fillStyle =
-        `hsl(${hue}, 90%, ${55 + value * 20}%)`;
-
-      ctx.fillRect(
-        i * barWidth + 1,
-        (height - barHeight) / 2,
-        Math.max(1, barWidth - 2),
-        barHeight
-      );
-    }
-  }
-
-  function drawAudioMeter() {
-    const analyser = state.masterAnalyser;
-
-    if (!analyser) return;
-
-    const data = new Uint8Array(
-      analyser.frequencyBinCount
-    );
-
-    analyser.getByteFrequencyData(data);
-
-    let total = 0;
-
-    for (let i = 0; i < data.length; i++) {
-      total += data[i];
-    }
-
-    const average =
-      data.length > 0
-        ? total / data.length
-        : 0;
-
-    const percent = clamp(
-      average / 255 * 100 * 2.5,
-      0,
-      100
-    );
-
-    const meter = $("masterMeter");
-
-    if (meter) {
-      meter.style.width = percent + "%";
-    }
-
-    const level = $("masterLevelText");
-
-    if (level) {
-      level.textContent =
-        Math.round(percent) + "%";
-    }
-  }
-
-  function updateMixerMeters() {
-    const music = state.tracks.music;
-    const voice = state.tracks.voice;
-    const keyboard = state.tracks.keyboard;
-
-    const anySolo = Object.values(state.tracks).some(
-      (track) => track.solo
-    );
-
-    const getVolume = (track) => {
-      if (track.muted) return 0;
-
-      if (anySolo && !track.solo) return 0;
-
-      return track.volume;
-    };
-
-    const musicPercent =
-      clamp(getVolume(music) * 100, 0, 100);
-
-    const voicePercent =
-      clamp(getVolume(voice) * 100, 0, 100);
-
-    const keyboardPercent =
-      clamp(getVolume(keyboard) * 100, 0, 100);
-
-    const meterIds = [
-      ["masterMeter", state.masterVolume * 100],
-      ["voiceMeter", voicePercent],
-      ["keyboardMeter", keyboardPercent]
-    ];
-
-    meterIds.forEach(([id, percent]) => {
-      const element = $(id);
-
-      if (element) {
-        element.style.width = percent + "%";
-      }
-    });
-
-    const clipping = $("clippingStatus");
-
-    if (clipping) {
-      clipping.textContent =
-        musicPercent > 95 ||
-        voicePercent > 95 ||
-        keyboardPercent > 95
-          ? "High level"
-          : "No clipping detected";
-
-      clipping.classList.toggle(
-        "text-warning",
-        musicPercent > 95 ||
-        voicePercent > 95 ||
-        keyboardPercent > 95
-      );
-    }
-  }
-
-  async function analyzeAudio() {
-    const track = getSelectedTrack();
-
-    if (!hasAudio(track)) {
-      toast("Analysis gochuuf audio upload godhi.");
-      return;
-    }
-
-    const buffer = track.audio.buffer;
-
-    let peak = 0;
-    let sumSquares = 0;
-    let sampleCount = 0;
-
-    const channelCount = buffer.numberOfChannels;
-
-    for (let channel = 0; channel < channelCount; channel++) {
-      const data = buffer.getChannelData(channel);
-
-      for (let i = 0; i < data.length; i++) {
-        const sample = data[i];
-
-        peak = Math.max(peak, Math.abs(sample));
-
-        sumSquares += sample * sample;
-        sampleCount++;
-      }
-    }
-
-    const rms =
-      sampleCount > 0
-        ? Math.sqrt(sumSquares / sampleCount)
-        : 0;
-
-    setStatus(
-      "analysisDuration",
-      formatTime(buffer.duration)
-    );
-
-    setStatus(
-      "analysisPeak",
-      peak.toFixed(4)
-    );
-
-    setStatus(
-      "analysisRms",
-      rms.toFixed(4)
-    );
-
-    setStatus(
-      "analysisSampleRate",
-      buffer.sampleRate + " Hz"
-    );
-
-    setStatus(
-      "analysisStatus",
-      "Analysis complete"
-    );
-
-    toast("Audio analysis xumurame.");
-  }
-
-  /* -------------------------------------------------------
-     EXPORT SUMMARY
-     ------------------------------------------------------- */
-
-  function updateExportSummary() {
-    setStatus(
-      "exportDuration",
-      formatTime(getProjectDuration())
-    );
-
-    setStatus(
-      "exportFormatSummary",
-      $("exportFormat")?.value?.toUpperCase() || "WAV"
-    );
-
-    setStatus(
-      "exportSampleRateSummary",
-      $("exportSampleRate")?.value + " Hz"
-    );
-
-    setStatus(
-      "exportQualitySummary",
-      $("exportQuality")?.value || "high"
-    );
-  }
-
-  /* -------------------------------------------------------
-     FILE UPLOAD / DROP ZONE
-     ------------------------------------------------------- */
-
-  function bindFileUpload() {
-    const input = $("audioUpload");
-
-    if (input) {
-      input.addEventListener("change", async () => {
-        const files = Array.from(input.files || []);
-
-        if (files.length === 0) return;
-
-        const target = state.selectedTrack;
-
-        await importAudioFile(files[0], target);
-
-        input.value = "";
-      });
-    }
-
-    const zone = $("uploadDropZone");
-
-    if (zone) {
-      zone.addEventListener("dragover", (event) => {
-        event.preventDefault();
-
-        zone.classList.add("drag-over");
-      });
-
-      zone.addEventListener("dragleave", () => {
-        zone.classList.remove("drag-over");
-      });
-
-      zone.addEventListener("drop", async (event) => {
-        event.preventDefault();
-
-        zone.classList.remove("drag-over");
-
-        const files = Array.from(
-          event.dataTransfer?.files || []
-        );
-
-        const file = files.find(
-          (item) =>
-            item.type.startsWith("audio/") ||
-            /\.(wav|mp3|m4a|aac|ogg|opus|flac|webm)$/i.test(
-              item.name
-            )
-        );
-
-        if (!file) {
-          toast("Audio file drop godhi.");
-          return;
+    function applyPreset(name) {
+        const track = getActiveTrack();
+        const preset = presets[name];
+
+        if (!track || !preset) {
+            showToast(
+                "Preset fayyadamuuf track audio qabu filadhu."
+            );
+
+            return;
         }
 
-        await importAudioFile(
-          file,
-          state.selectedTrack
+        track.bass = preset.bass;
+        track.mid = preset.mid;
+        track.treble = preset.treble;
+        track.reverb = preset.reverb;
+        track.delay = preset.delay;
+        track.distortion = preset.distortion;
+        track.volume = preset.volume / 100;
+
+        loadTrackControls(track);
+        applyTrackEffects(track);
+
+        safeText(
+            $("presetStatus"),
+            "Preset: " + name
         );
-      });
+
+        saveUndoState();
+
+        showToast(
+            name.charAt(0).toUpperCase() +
+            name.slice(1) +
+            " preset applied."
+        );
     }
-  }
 
-  /* -------------------------------------------------------
-     TRACK SELECTION
-     ------------------------------------------------------- */
+    /* =====================================================
+       13. MIXER METERS
+       ===================================================== */
 
-  function bindTrackSelection() {
-    $$(".timeline-track").forEach((element) => {
-      const type = element.dataset.trackType;
+    function updateMasterMeter() {
+        if (!state.masterAnalyser) {
+            return;
+        }
 
-      if (!type || !state.tracks[type]) return;
+        const data = new Uint8Array(
+            state.masterAnalyser.fftSize
+        );
 
-      element.addEventListener("click", (event) => {
-        if (
-          event.target.closest("button") ||
-          event.target.closest(".audio-clip")
+        state.masterAnalyser.getByteTimeDomainData(data);
+
+        let sum = 0;
+        let peak = 0;
+
+        for (const byte of data) {
+            const sample = (byte - 128) / 128;
+
+            sum += sample * sample;
+            peak = Math.max(peak, Math.abs(sample));
+        }
+
+        const rms = Math.sqrt(sum / data.length);
+
+        const meter = $("masterMeter");
+
+        if (meter) {
+            const level = clamp(rms * 220, 0, 100);
+
+            meter.style.width = level + "%";
+            meter.setAttribute("aria-valuenow", String(level));
+        }
+
+        const clipping = $("clippingStatus");
+
+        if (clipping) {
+            clipping.textContent =
+                peak > 0.98 ? "Clipping risk" : "Signal OK";
+
+            clipping.classList.toggle(
+                "clipping",
+                peak > 0.98
+            );
+        }
+    }
+
+    function updateTrackMeters() {
+        state.tracks.forEach((track) => {
+            if (!track.nodes?.analyser) {
+                return;
+            }
+
+            const analyser = track.nodes.analyser;
+
+            const data = new Uint8Array(
+                analyser.fftSize
+            );
+
+            analyser.getByteTimeDomainData(data);
+
+            let sum = 0;
+
+            for (const byte of data) {
+                const sample = (byte - 128) / 128;
+                sum += sample * sample;
+            }
+
+            const rms = Math.sqrt(sum / data.length);
+
+            const meterId =
+                track.type === "voice"
+                    ? "voiceMeter"
+                    : track.type === "keyboard"
+                        ? "keyboardMeter"
+                        : "audioMeter";
+
+            const meter = $(meterId);
+
+            if (meter) {
+                meter.style.width =
+                    clamp(rms * 220, 0, 100) + "%";
+            }
+        });
+    }
+
+    /* =====================================================
+       14. AUDIO ANALYSIS
+       ===================================================== */
+
+    function analyseActiveAudio() {
+        const track = getActiveTrack();
+
+        if (!track?.buffer) {
+            showToast("Analysis gochuuf audio galchi.");
+            return;
+        }
+
+        const buffer = track.buffer;
+
+        let peak = 0;
+        let sumSquares = 0;
+        let count = 0;
+
+        for (
+            let channel = 0;
+            channel < buffer.numberOfChannels;
+            channel++
         ) {
-          return;
+            const data = buffer.getChannelData(channel);
+
+            for (let i = 0; i < data.length; i++) {
+                const value = data[i];
+
+                peak = Math.max(peak, Math.abs(value));
+                sumSquares += value * value;
+                count++;
+            }
         }
 
-        selectTrack(type);
-      });
-    });
+        const rms = count
+            ? Math.sqrt(sumSquares / count)
+            : 0;
 
-    $$("[data-track-action]").forEach((button) => {
-      button.addEventListener("click", (event) => {
-        event.stopPropagation();
+        const peakDb = peak > 0
+            ? 20 * Math.log10(peak)
+            : -Infinity;
 
-        toggleTrackAction(
-          button.dataset.track,
-          button.dataset.trackAction
+        const rmsDb = rms > 0
+            ? 20 * Math.log10(rms)
+            : -Infinity;
+
+        safeText(
+            $("analysisDuration"),
+            formatTime(buffer.duration)
         );
-      });
-    });
-  }
 
-  /* -------------------------------------------------------
-     TIMELINE SEEK
-     ------------------------------------------------------- */
+        safeText(
+            $("analysisPeak"),
+            Number.isFinite(peakDb)
+                ? peakDb.toFixed(2) + " dBFS"
+                : "-∞ dBFS"
+        );
 
-  function bindTimelineSeeking() {
-    const ruler = $("timelineRuler");
+        safeText(
+            $("analysisRms"),
+            Number.isFinite(rmsDb)
+                ? rmsDb.toFixed(2) + " dBFS"
+                : "-∞ dBFS"
+        );
 
-    if (!ruler) return;
+        safeText(
+            $("analysisSampleRate"),
+            buffer.sampleRate + " Hz"
+        );
 
-    ruler.style.cursor = "pointer";
+        safeText(
+            $("analysisStatus"),
+            "Analysis complete"
+        );
 
-    ruler.addEventListener("click", (event) => {
-      const rect = ruler.getBoundingClientRect();
+        state.lastAnalysis = {
+            duration: buffer.duration,
+            peak,
+            peakDb,
+            rms,
+            rmsDb,
+            sampleRate: buffer.sampleRate
+        };
 
-      const ratio = clamp(
-        (event.clientX - rect.left) /
-          Math.max(1, rect.width),
-        0,
-        1
-      );
-
-      const duration = getProjectDuration();
-
-      seekPlayback(ratio * duration);
-    });
-  }
-
-  /* -------------------------------------------------------
-     PROJECT NAME / RESTORE INPUT
-     ------------------------------------------------------- */
-
-  function bindProjectTools() {
-    const nameInput = $("projectName");
-
-    if (nameInput) {
-      nameInput.addEventListener("input", () => {
-        state.projectName = nameInput.value;
-      });
+        showToast("Audio analysis xumurame.");
     }
 
-    const restoreInput = $("restoreProjectInput");
+    /* =====================================================
+       15. OFFLINE MIX AND WAV EXPORT
+       ===================================================== */
 
-    if (restoreInput) {
-      restoreInput.addEventListener("change", async () => {
-        const file = restoreInput.files?.[0];
+    function audioBufferToWav(buffer) {
+        const channels = buffer.numberOfChannels;
+        const sampleRate = buffer.sampleRate;
+        const length = buffer.length;
 
-        if (file) {
-          await restoreProjectFile(file);
+        const bytesPerSample = 2;
+        const blockAlign = channels * bytesPerSample;
+        const dataSize = length * blockAlign;
+
+        const arrayBuffer = new ArrayBuffer(
+            44 + dataSize
+        );
+
+        const view = new DataView(arrayBuffer);
+
+        const writeString = (offset, text) => {
+            for (let i = 0; i < text.length; i++) {
+                view.setUint8(offset + i, text.charCodeAt(i));
+            }
+        };
+
+        writeString(0, "RIFF");
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(8, "WAVE");
+        writeString(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, channels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(
+            28,
+            sampleRate * blockAlign,
+            true
+        );
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        writeString(36, "data");
+        view.setUint32(40, dataSize, true);
+
+        let offset = 44;
+
+        const channelData = [];
+
+        for (let c = 0; c < channels; c++) {
+            channelData.push(buffer.getChannelData(c));
         }
 
-        restoreInput.value = "";
-      });
+        for (let i = 0; i < length; i++) {
+            for (let c = 0; c < channels; c++) {
+                let sample = channelData[c][i] || 0;
+
+                sample = clamp(sample, -1, 1);
+
+                const intSample = sample < 0
+                    ? sample * 0x8000
+                    : sample * 0x7fff;
+
+                view.setInt16(
+                    offset,
+                    intSample,
+                    true
+                );
+
+                offset += 2;
+            }
+        }
+
+        return new Blob(
+            [arrayBuffer],
+            { type: "audio/wav" }
+        );
     }
-  }
 
-  /* -------------------------------------------------------
-     BUTTON BINDINGS
-     ------------------------------------------------------- */
+    async function renderOfflineMix() {
+        const availableTracks = state.tracks.filter(
+            (track) => track.buffer
+        );
 
-  function bindButton(id, callback) {
-    const element = $(id);
+        if (availableTracks.length === 0) {
+            throw new Error("Audio track hin jiru.");
+        }
 
-    if (!element) {
-      console.warn(
-        "Naol Music Studio: missing element #" + id
-      );
+        const sampleRate = clamp(
+            readNumber("exportSampleRate", 44100),
+            22050,
+            96000
+        );
 
-      return;
+        const channels =
+            $("exportChannels")?.value === "mono" ? 1 : 2;
+
+        const endTime = Math.max(
+            ...availableTracks.map((track) => {
+                const end =
+                    track.trimEnd ??
+                    track.buffer.duration;
+
+                return (
+                    track.startTime +
+                    Math.max(0, end - track.trimStart)
+                );
+            })
+        );
+
+        const length = Math.max(
+            1,
+            Math.ceil(endTime * sampleRate)
+        );
+
+        const OfflineContext =
+            window.OfflineAudioContext ||
+            window.webkitOfflineAudioContext;
+
+        if (!OfflineContext) {
+            throw new Error(
+                "OfflineAudioContext hin deeggaramu."
+            );
+        }
+
+        const offline = new OfflineContext(
+            channels,
+            length,
+            sampleRate
+        );
+
+        const master = offline.createGain();
+
+        const masterVolume = clamp(
+            readNumber("mixerVolume", 100) / 100,
+            0,
+            1.5
+        );
+
+        master.gain.value = masterVolume;
+
+        master.connect(offline.destination);
+
+        const exportSource =
+            $("exportSource")?.value || "mix";
+
+        availableTracks.forEach((track) => {
+            if (
+                exportSource === "music" &&
+                track.type !== "music"
+            ) {
+                return;
+            }
+
+            if (
+                track.muted ||
+                (
+                    state.soloTrackId !== null &&
+                    state.soloTrackId !== track.id
+                )
+            ) {
+                return;
+            }
+
+            const source = offline.createBufferSource();
+            const gain = offline.createGain();
+            const pan = offline.createStereoPanner();
+
+            const bass = offline.createBiquadFilter();
+            const mid = offline.createBiquadFilter();
+            const treble = offline.createBiquadFilter();
+
+            const delay = offline.createDelay(2);
+            const delayWet = offline.createGain();
+
+            const reverb = offline.createConvolver();
+            const reverbWet = offline.createGain();
+
+            source.buffer = track.buffer;
+
+            bass.type = "lowshelf";
+            bass.frequency.value = 180;
+            bass.gain.value = track.bass;
+
+            mid.type = "peaking";
+            mid.frequency.value = 1000;
+            mid.Q.value = 0.8;
+            mid.gain.value = track.mid;
+
+            treble.type = "highshelf";
+            treble.frequency.value = 5000;
+            treble.gain.value = track.treble;
+
+            pan.pan.value = track.pan;
+            gain.gain.value = track.volume;
+
+            delay.delayTime.value = 0.18;
+            delayWet.gain.value = track.delay / 100 * 0.5;
+
+            reverbWet.gain.value =
+                track.reverb / 100 * 0.5;
+
+            const impulseLength = Math.floor(
+                sampleRate * 1.0
+            );
+
+            const impulse = offline.createBuffer(
+                2,
+                impulseLength,
+                sampleRate
+            );
+
+            for (let c = 0; c < 2; c++) {
+                const data = impulse.getChannelData(c);
+
+                for (let i = 0; i < impulseLength; i++) {
+                    data[i] =
+                        (Math.random() * 2 - 1) *
+                        Math.pow(
+                            1 - i / impulseLength,
+                            2
+                        );
+                }
+            }
+
+            reverb.buffer = impulse;
+
+            source.connect(bass);
+            bass.connect(mid);
+            mid.connect(treble);
+            treble.connect(gain);
+
+            gain.connect(pan);
+            pan.connect(master);
+
+            gain.connect(delay);
+            delay.connect(delayWet);
+            delayWet.connect(master);
+
+            gain.connect(reverb);
+            reverb.connect(reverbWet);
+            reverbWet.connect(master);
+
+            const offset = clamp(
+                track.trimStart,
+                0,
+                track.buffer.duration
+            );
+
+            const end = clamp(
+                track.trimEnd ?? track.buffer.duration,
+                offset,
+                track.buffer.duration
+            );
+
+            const duration = Math.max(0, end - offset);
+
+            if (duration <= 0) {
+                return;
+            }
+
+            const startTime = Math.max(0, track.startTime);
+
+            source.start(
+                startTime,
+                offset,
+                duration
+            );
+        });
+
+        let rendered = await offline.startRendering();
+
+        if (channels === 1 && rendered.numberOfChannels > 1) {
+            const monoContext = new OfflineContext(
+                1,
+                rendered.length,
+                rendered.sampleRate
+            );
+
+            const monoBuffer = monoContext.createBuffer(
+                1,
+                rendered.length,
+                rendered.sampleRate
+            );
+
+            const left = rendered.getChannelData(0);
+            const right = rendered.getChannelData(1);
+            const mono = monoBuffer.getChannelData(0);
+
+            for (let i = 0; i < mono.length; i++) {
+                mono[i] = (left[i] + right[i]) / 2;
+            }
+
+            rendered = monoBuffer;
+        }
+
+        if ($("normalizeExport")?.checked) {
+            let peak = 0;
+
+            for (
+                let channel = 0;
+                channel < rendered.numberOfChannels;
+                channel++
+            ) {
+                const data = rendered.getChannelData(channel);
+
+                for (let i = 0; i < data.length; i++) {
+                    peak = Math.max(
+                        peak,
+                        Math.abs(data[i])
+                    );
+                }
+            }
+
+            if (peak > 0) {
+                const multiplier = 0.98 / peak;
+
+                for (
+                    let channel = 0;
+                    channel < rendered.numberOfChannels;
+                      channel++
+                ) {
+                    const data = rendered.getChannelData(channel);
+
+                    for (let i = 0; i < data.length; i++) {
+                        data[i] *= multiplier;
+                    }
+                }
+            }
+        }
+
+        return rendered;
     }
 
-    element.addEventListener("click", (event) => {
-      event.preventDefault();
+    async function exportAudio() {
+        const button = $("exportBtn");
 
-      try {
-        const result = callback(event);
+        if (button) {
+            button.disabled = true;
+        }
 
-        if (result && typeof result.catch === "function") {
-          result.catch((error) => {
+        const progressWrap = $("exportProgressWrap");
+
+        if (progressWrap) {
+            progressWrap.hidden = false;
+        }
+
+        safeText($("exportProgressText"), "Rendering audio...");
+        safeText($("exportProgressPercent"), "10%");
+
+        if ($("exportProgress")) {
+            $("exportProgress").value = 10;
+        }
+
+        try {
+            const format =
+                $("exportFormat")?.value || "wav";
+
+            if (format === "mp3") {
+                showToast(
+                    "MP3 export'f encoder hin jiru. WAV filadhu."
+                );
+
+                safeText(
+                    $("exportStatus"),
+                    "MP3 encoder hin jiru. WAV fayyadami."
+                );
+
+                return;
+            }
+
+            const buffer = await renderOfflineMix();
+
+            safeText(
+                $("exportProgressText"),
+                "WAV qophaa'aa jira..."
+            );
+
+            safeText(
+                $("exportProgressPercent"),
+                "80%"
+            );
+
+            if ($("exportProgress")) {
+                $("exportProgress").value = 80;
+            }
+
+            const wav = audioBufferToWav(buffer);
+
+            state.exportBlob = wav;
+
+            if (state.exportUrl) {
+                URL.revokeObjectURL(state.exportUrl);
+            }
+
+            state.exportUrl = URL.createObjectURL(wav);
+
+            const filename =
+                ($("exportFileName")?.value || "naol-mix")
+                    .trim()
+                    .replace(/[\\/:*?"<>|]+/g, "-");
+
+            downloadBlob(
+                state.exportBlob,
+                filename.toLowerCase().endsWith(".wav")
+                    ? filename
+                    : filename + ".wav"
+            );
+
+            safeText(
+                $("exportProgressText"),
+                "Export complete"
+            );
+
+            safeText(
+                $("exportProgressPercent"),
+                "100%"
+            );
+
+            if ($("exportProgress")) {
+                $("exportProgress").value = 100;
+            }
+
+            safeText(
+                $("exportStatus"),
+                "WAV export xumurame."
+            );
+
+            setButtonEnabled("downloadExportBtn", true);
+
+            showToast("WAV file buufachuun jalqabame.");
+        } catch (error) {
+            console.error("Export failed:", error);
+
+            safeText(
+                $("exportStatus"),
+                "Export failed: " + error.message
+            );
+
+            showToast(
+                "Export hin milkoofne. Audio galchuu mirkaneessi."
+            );
+        } finally {
+            if (button) {
+                button.disabled = false;
+            }
+        }
+    }
+
+    function downloadExport() {
+        if (!state.exportBlob) {
+            showToast("Jalqaba export godhi.");
+            return;
+        }
+
+        const filename =
+            ($("exportFileName")?.value || "naol-mix")
+                .trim()
+                .replace(/[\\/:*?"<>|]+/g, "-");
+
+        downloadBlob(
+            state.exportBlob,
+            filename.toLowerCase().endsWith(".wav")
+                ? filename
+                : filename + ".wav"
+        );
+    }
+
+    function updateExportSummary() {
+        const active = getActiveTrack();
+
+        safeText(
+            $("exportDuration"),
+            formatTime(active?.buffer?.duration || 0)
+        );
+
+        safeText(
+            $("exportFormatSummary"),
+            $("exportFormat")?.value?.toUpperCase() || "WAV"
+        );
+
+        safeText(
+            $("exportSampleRateSummary"),
+            ($("exportSampleRate")?.value || "44100") +
+            " Hz"
+        );
+
+        safeText(
+            $("exportQualitySummary"),
+            $("exportQuality")?.value || "High"
+        );
+    }
+
+    /* =====================================================
+       16. PROJECT SAVE AND RESTORE
+       ===================================================== */
+
+    function serialiseProject() {
+        return {
+            version: 1,
+            name: state.projectName,
+            savedAt: new Date().toISOString(),
+            tracks: state.tracks.map((track) => ({
+                id: track.id,
+                name: track.name,
+                type: track.type,
+                fileName: track.fileName,
+                volume: track.volume,
+                pan: track.pan,
+                bass: track.bass,
+                mid: track.mid,
+                treble: track.treble,
+                reverb: track.reverb,
+                delay: track.delay,
+                distortion: track.distortion,
+                muted: track.muted,
+                startTime: track.startTime,
+                trimStart: track.trimStart,
+                trimEnd: track.trimEnd
+            }))
+        };
+    }
+
+    function saveProjectState() {
+        try {
+            const project = serialiseProject();
+
+            localStorage.setItem(
+                "naolMusicStudioProject",
+                JSON.stringify(project)
+            );
+
+            const name = $("projectName");
+
+            if (name) {
+                state.projectName = name.value ||
+                    "Naol Music Studio 3D";
+            }
+
+            safeText($("saveStatus"), "Saved");
+            safeText($("projectState"), "Project saved");
+
+            showToast(
+                "Project settings browser keessatti olkaa'aman."
+            );
+        } catch (error) {
             console.error(error);
 
-            toast(
-              "Hojii kana raawwachuun hin milkoofne."
+            showToast(
+                "Project save hin danda'amne."
             );
-          });
         }
-      } catch (error) {
-        console.error(error);
+    }
 
-        toast(
-          "Dogoggorri uumame. Console qoradhu."
+    function backupProject() {
+        const project = serialiseProject();
+
+        const blob = new Blob(
+            [JSON.stringify(project, null, 2)],
+            { type: "application/json" }
         );
-      }
-    });
-  }
 
-  function bindButtons() {
-    bindButton("playBtn", togglePlayback);
+        downloadBlob(
+            blob,
+            "naol-music-studio-project.json"
+        );
+    }
 
-    bindButton("stopBtn", () => stopPlayback());
-
-    bindButton("restartBtn", () => {
-      state.playStartOffset = 0;
-
-      if (state.isPlaying) {
-        startPlayback();
-      } else {
-        setStatus("timeDisplay", "00:00");
-        updatePlayhead(0);
-      }
-    });
-
-    bindButton("splitBtn", splitSelectedTrack);
-    bindButton("trimStartBtn", trimTrackStart);
-    bindButton("trimEndBtn", trimTrackEnd);
-    bindButton("deleteAudioBtn", deleteSelectedAudio);
-
-    bindButton("zoomInBtn", () => {
-      state.zoom = clamp(state.zoom * 1.2, 0.5, 5);
-
-      updateTimeline();
-    });
-
-    bindButton("zoomOutBtn", () => {
-      state.zoom = clamp(state.zoom / 1.2, 0.5, 5);
-
-      updateTimeline();
-    });
-
-    bindButton("fitTimelineBtn", () => {
-      state.zoom = 1;
-
-      updateTimeline();
-    });
-
-    bindButton("resetAdjustmentsBtn", resetAdjustments);
-    bindButton("compareBtn", toggleCompare);
-
-    bindButton("recordBtn", startVoiceRecording);
-    bindButton("pauseRecordBtn", pauseVoiceRecording);
-    bindButton("resumeRecordBtn", resumeVoiceRecording);
-    bindButton("stopRecordBtn", stopVoiceRecording);
-
-    bindButton("downloadRecordingBtn", downloadVoiceRecording);
-    bindButton("useRecordingBtn", addVoiceRecordingToTimeline);
-    bindButton("discardRecordingBtn", discardVoiceRecording);
-
-    bindButton("recordKeyboardBtn", startKeyboardRecording);
-    bindButton("pauseKeyboardBtn", pauseKeyboardRecording);
-    bindButton("resumeKeyboardBtn", resumeKeyboardRecording);
-    bindButton("stopKeyboardBtn", stopKeyboardRecording);
-
-    bindButton("playKeyboardRecordingBtn", playKeyboardRecording);
-    bindButton("useKeyboardRecordingBtn", addKeyboardRecordingToTimeline);
-    bindButton("downloadKeyboardRecordingBtn", downloadKeyboardRecording);
-
-    bindButton("sustainBtn", () => {
-      const button = $("sustainBtn");
-
-      if (!button) return;
-
-      button.classList.toggle("active");
-
-      button.setAttribute(
-        "aria-pressed",
-        button.classList.contains("active")
-          ? "true"
-          : "false"
-      );
-
-      toast(
-        button.classList.contains("active")
-          ? "Sustain enabled"
-          : "Sustain disabled"
-      );
-    });
-
-    bindButton("muteBtn", () => {
-      state.tracks.music.muted =
-        !state.tracks.music.muted;
-
-      updateTrackMuteSoloGains();
-    });
-
-    bindButton("analyzeAudioBtn", analyzeAudio);
-
-    bindButton("exportBtn", exportAudio);
-    bindButton("downloadExportBtn", downloadExport);
-
-    bindButton("saveProjectBtn", saveProject);
-    bindButton("backupProjectBtn", backupProject);
-
-    bindButton("undoBtn", undo);
-    bindButton("redoBtn", redo);
-
-    bindButton("addTrackBtn", addEmptyTrack);
-
-    $$(".preset-button").forEach((button) => {
-      button.addEventListener("click", () => {
-        const name = button.dataset.preset;
-
-        if (name) {
-          applyPreset(name);
+    function restoreProjectFile(file) {
+        if (!file) {
+            return;
         }
-      });
-    });
-  }
 
-  /* -------------------------------------------------------
-     PLAYBACK SPEED
-     ------------------------------------------------------- */
+        const reader = new FileReader();
 
-  function bindPlaybackSpeed() {
-    const select = $("playbackSpeed");
+        reader.onload = () => {
+            try {
+                const project = JSON.parse(reader.result);
 
-    if (!select) return;
+                if (!project || !Array.isArray(project.tracks)) {
+                    throw new Error("Project format sirrii miti.");
+                }
 
-    select.addEventListener("change", () => {
-      const speed = Number(select.value);
+                project.tracks.forEach((savedTrack) => {
+                    const existing = state.tracks.find(
+                        (track) =>
+                            track.name === savedTrack.name &&
+                            track.type === savedTrack.type
+                    );
 
-      state.playbackSpeed = clamp(
-        Number.isFinite(speed) ? speed : 1,
-        0.25,
-        2
-      );
+                    if (existing) {
+                        Object.assign(existing, {
+                            volume: savedTrack.volume ?? 1,
+                            pan: savedTrack.pan ?? 0,
+                            bass: savedTrack.bass ?? 0,
+                            mid: savedTrack.mid ?? 0,
+                            treble: savedTrack.treble ?? 0,
+                            reverb: savedTrack.reverb ?? 0,
+                            delay: savedTrack.delay ?? 0,
+                            distortion: savedTrack.distortion ?? 0,
+                            startTime: savedTrack.startTime ?? 0,
+                            trimStart: savedTrack.trimStart ?? 0,
+                            trimEnd: savedTrack.trimEnd ??
+                                existing.buffer?.duration ??
+                                null,
+                            muted: Boolean(savedTrack.muted)
+                        });
 
-      if (state.isPlaying) {
-        const current = getPlaybackTime();
+                        applyTrackEffects(existing);
+                    }
+                });
 
-        state.playStartOffset = current;
+                state.projectName =
+                    project.name || state.projectName;
 
-        startPlayback();
-      }
-    });
-  }
+                if ($("projectName")) {
+                    $("projectName").value =
+                        state.projectName;
+                }
 
-  /* -------------------------------------------------------
-     SEEK BAR
-     ------------------------------------------------------- */
+                renderTrackList();
+                renderTimeline();
 
-  function bindSeekBar() {
-    const seekBar = $("seekBar");
+                showToast(
+                    "Project settings restore ta'aniiru. Audio faayiloota yoo barbaachise irra deebi'ii galchi."
+                );
+            } catch (error) {
+                console.error(error);
 
-    if (!seekBar) return;
+                showToast(
+                    "Project file dubbisuu hin dandeenye."
+                );
+            }
+        };
 
-    seekBar.addEventListener("input", () => {
-      seekPlayback(seekBar.value);
-    });
-  }
+        reader.readAsText(file);
+    }
 
-  /* -------------------------------------------------------
-     EXPORT SETTINGS
-     ------------------------------------------------------- */
+    /* =====================================================
+       17. UNDO / REDO
+       ===================================================== */
 
-  function bindExportSettings() {
-    [
-      "exportFormat",
-      "exportSampleRate",
-      "exportQuality",
-      "exportChannels",
-      "exportSource",
-      "normalizeExport"
-    ].forEach((id) => {
-      const element = $(id);
+    function snapshotState() {
+        return state.tracks.map((track) => ({
+            id: track.id,
+            name: track.name,
+            type: track.type,
+            buffer: track.buffer,
+            fileName: track.fileName,
+            volume: track.volume,
+            pan: track.pan,
+            bass: track.bass,
+            mid: track.mid,
+            treble: track.treble,
+            reverb: track.reverb,
+            delay: track.delay,
+            distortion: track.distortion,
+            muted: track.muted,
+            solo: track.solo,
+            startTime: track.startTime,
+            trimStart: track.trimStart,
+            trimEnd: track.trimEnd
+        }));
+    }
 
-      if (!element) return;
+    function saveUndoState() {
+        state.undoStack.push(snapshotState());
 
-      element.addEventListener("change", () => {
+        if (state.undoStack.length > 40) {
+            state.undoStack.shift();
+        }
+
+        state.redoStack = [];
+
+        setButtonEnabled(
+            "undoBtn",
+            state.undoStack.length > 1
+        );
+
+        setButtonEnabled("redoBtn", false);
+    }
+
+    function restoreSnapshot(snapshot) {
+        stopPlayback();
+
+        state.tracks = snapshot.map((saved) => {
+            const track = { ...saved };
+
+            track.nodes = null;
+            track.source = null;
+
+            makeTrackNodes(track);
+
+            return track;
+        });
+
+        state.activeTrackId =
+            state.tracks[0]?.id ?? null;
+
+        renderTrackList();
+        renderTimeline();
+        updateTrackSelectors();
+
+        const active = getActiveTrack();
+
+        if (active) {
+            loadTrackControls(active);
+            updateTrackInformation(active);
+        }
+    }
+
+    function undo() {
+        if (state.undoStack.length <= 1) {
+            showToast("Undo history hin jiru.");
+            return;
+        }
+
+        const current = state.undoStack.pop();
+
+        state.redoStack.push(current);
+
+        const previous = state.undoStack[
+            state.undoStack.length - 1
+        ];
+
+        restoreSnapshot(previous);
+
+        setButtonEnabled(
+            "undoBtn",
+            state.undoStack.length > 1
+        );
+
+        setButtonEnabled(
+            "redoBtn",
+            state.redoStack.length > 0
+        );
+    }
+
+    function redo() {
+        if (state.redoStack.length === 0) {
+            showToast("Redo history hin jiru.");
+            return;
+        }
+
+        const next = state.redoStack.pop();
+
+        state.undoStack.push(next);
+
+        restoreSnapshot(next);
+
+        setButtonEnabled(
+            "undoBtn",
+            state.undoStack.length > 1
+        );
+
+        setButtonEnabled(
+            "redoBtn",
+            state.redoStack.length > 0
+        );
+    }
+
+    /* =====================================================
+       18. NAVIGATION AND UI
+       ===================================================== */
+
+    function navigateToSection(sectionId) {
+        const section = $(sectionId);
+
+        if (!section) {
+            return;
+        }
+
+        $$(".nav-item").forEach((item) => {
+            item.classList.toggle(
+                "active",
+                item.dataset.section === sectionId
+            );
+        });
+
+        $$(".app-section").forEach((item) => {
+            item.classList.toggle(
+                "active",
+                item.id === sectionId
+            );
+        });
+
+        section.scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+    }
+
+    function setupNavigation() {
+        $$(".nav-item[data-section]").forEach((button) => {
+            button.addEventListener("click", () => {
+                navigateToSection(
+                    button.dataset.section
+                );
+            });
+        });
+    }
+
+    function setupDropZone() {
+        const zone = $("uploadDropZone");
+        const input = $("audioUpload");
+
+        if (!zone || !input) {
+            return;
+        }
+
+        zone.addEventListener("click", () => {
+            input.click();
+        });
+
+        zone.addEventListener("dragover", (event) => {
+            event.preventDefault();
+            zone.classList.add("dragover");
+        });
+
+        zone.addEventListener("dragleave", () => {
+            zone.classList.remove("dragover");
+        });
+
+        zone.addEventListener("drop", (event) => {
+            event.preventDefault();
+
+            zone.classList.remove("dragover");
+
+            importAudioFiles(
+                event.dataTransfer.files
+            );
+        });
+
+        input.addEventListener("change", (event) => {
+            importAudioFiles(event.target.files);
+
+            input.value = "";
+        });
+    }
+
+    function setupTrackActions() {
+        $$("[data-track-action]").forEach((button) => {
+            button.addEventListener("click", () => {
+                const action =
+                    button.dataset.trackAction;
+
+                const type =
+                    button.dataset.track;
+
+                const track = state.tracks.find(
+                    (item) => item.type === type
+                );
+
+                if (!track) {
+                    showToast(
+                        "Track " + type + " hin jiru."
+                    );
+
+                    return;
+                }
+
+                if (action === "mute") {
+                    track.muted = !track.muted;
+                } else if (action === "solo") {
+                    state.soloTrackId =
+                        state.soloTrackId === track.id
+                            ? null
+                            : track.id;
+                }
+
+                applyTrackEffects(track);
+                renderTrackList();
+            });
+        });
+    }
+
+    function setupControlListeners() {
+        const sliderIds = [
+            "volumeControl",
+            "panControl",
+            "bassControl",
+            "midControl",
+            "trebleControl",
+            "reverbControl",
+            "delayControl",
+            "distortionControl"
+        ];
+
+        sliderIds.forEach((id) => {
+            const element = $(id);
+
+            if (!element) {
+                return;
+            }
+
+            element.addEventListener("input", () => {
+                updateActiveControl(
+                    id,
+                    Number(element.value)
+                );
+            });
+
+            element.addEventListener("change", () => {
+                saveUndoState();
+            });
+        });
+
+        $("resetAdjustmentsBtn")?.addEventListener(
+            "click",
+            resetActiveAdjustments
+        );
+
+        $("compareBtn")?.addEventListener(
+            "click",
+            toggleCompare
+        );
+
+        $("fadeInControl")?.addEventListener(
+            "input",
+            (event) => {
+                safeText(
+                    $("fadeInValue"),
+                    event.target.value + " s"
+                );
+            }
+        );
+
+        $("fadeOutControl")?.addEventListener(
+            "input",
+            (event) => {
+                safeText(
+                    $("fadeOutValue"),
+                    event.target.value + " s"
+                );
+            }
+        );
+    }
+
+    function setupPlaybackControls() {
+        $("playBtn")?.addEventListener(
+            "click",
+            togglePlayback
+        );
+
+        $("stopBtn")?.addEventListener(
+            "click",
+            stopPlayback
+        );
+
+        $("restartBtn")?.addEventListener(
+            "click",
+            () => {
+                stopPlayback();
+                playAllTracks(0);
+            }
+        );
+
+        $("seekBar")?.addEventListener(
+            "input",
+            (event) => {
+                seekTo(Number(event.target.value) / 1000);
+            }
+        );
+
+        $("zoomInBtn")?.addEventListener(
+            "click",
+            () => {
+                state.zoom = clamp(
+                    state.zoom * 1.25,
+                    0.25,
+                    10
+                );
+
+                renderTimeline();
+            }
+        );
+
+        $("zoomOutBtn")?.addEventListener(
+            "click",
+            () => {
+                state.zoom = clamp(
+                    state.zoom / 1.25,
+                    0.25,
+                    10
+                );
+
+                renderTimeline();
+            }
+        );
+
+        $("fitTimelineBtn")?.addEventListener(
+            "click",
+            () => {
+                state.zoom = 1;
+                renderTimeline();
+            }
+        );
+
+        $("splitBtn")?.addEventListener(
+            "click",
+            splitActiveTrack
+        );
+
+        $("trimStartBtn")?.addEventListener(
+            "click",
+            trimActiveTrackStart
+        );
+
+        $("trimEndBtn")?.addEventListener(
+            "click",
+            trimActiveTrackEnd
+        );
+
+        $("deleteAudioBtn")?.addEventListener(
+            "click",
+            deleteActiveAudio
+        );
+
+        $("playbackSpeed")?.addEventListener(
+            "change",
+            () => {
+                if (state.playing) {
+                    const position = getCurrentPosition();
+
+                    playAllTracks(position);
+                }
+            }
+        );
+
+        $("addTrackBtn")?.addEventListener(
+            "click",
+            () => {
+                const track = createTrack({
+                    name:
+                        "New Track " +
+                        (state.tracks.length + 1),
+                    type: "music"
+                });
+
+                selectTrack(track.id);
+
+                showToast("Track haaraan uumame.");
+            }
+        );
+    }
+
+    function setupVoiceControls() {
+        $("recordBtn")?.addEventListener(
+            "click",
+            startVoiceRecording
+        );
+
+        $("pauseRecordBtn")?.addEventListener(
+            "click",
+            pauseVoiceRecording
+        );
+
+        $("resumeRecordBtn")?.addEventListener(
+            "click",
+            resumeVoiceRecording
+        );
+
+        $("stopRecordBtn")?.addEventListener(
+            "click",
+            stopVoiceRecording
+        );
+
+        $("downloadRecordingBtn")?.addEventListener(
+            "click",
+            downloadVoiceRecording
+        );
+
+        $("useRecordingBtn")?.addEventListener(
+            "click",
+            useVoiceRecording
+        );
+
+        $("discardRecordingBtn")?.addEventListener(
+            "click",
+            discardVoiceRecording
+        );
+
+        $$(".preset-button[data-preset]").forEach(
+            (button) => {
+                button.addEventListener("click", () => {
+                    applyPreset(button.dataset.preset);
+                });
+            }
+        );
+
+        const monitoring = $("monitoringControl");
+
+        monitoring?.addEventListener("input", () => {
+            safeText(
+                $("monitoringValue"),
+                monitoring.value + "%"
+            );
+        });
+    }
+
+    function setupKeyboardControls() {
+        $("instrumentSelect")?.addEventListener(
+            "change",
+            buildKeyboard
+        );
+
+        $("octaveSelect")?.addEventListener(
+            "change",
+            buildKeyboard
+        );
+
+        $("recordKeyboardBtn")?.addEventListener(
+            "click",
+            startKeyboardRecording
+        );
+
+        $("pauseKeyboardBtn")?.addEventListener(
+            "click",
+            pauseKeyboardRecording
+        );
+
+        $("resumeKeyboardBtn")?.addEventListener(
+            "click",
+            resumeKeyboardRecording
+        );
+
+        $("stopKeyboardBtn")?.addEventListener(
+            "click",
+            stopKeyboardRecording
+        );
+
+        $("playKeyboardRecordingBtn")?.addEventListener(
+            "click",
+            playKeyboardRecording
+        );
+
+        $("useKeyboardRecordingBtn")?.addEventListener(
+            "click",
+            useKeyboardRecording
+        );
+
+        $("downloadKeyboardRecordingBtn")?.addEventListener(
+            "click",
+            downloadKeyboardRecording
+        );
+
+        $("sustainBtn")?.addEventListener(
+            "click",
+            () => {
+                const button = $("sustainBtn");
+
+                if (!button) {
+                    return;
+                }
+
+                const enabled =
+                    button.dataset.enabled !== "true";
+
+                button.dataset.enabled = String(enabled);
+
+                button.classList.toggle(
+                    "active",
+                    enabled
+                );
+
+                showToast(
+                    enabled
+                        ? "Sustain on"
+                        : "Sustain off"
+                );
+            }
+        );
+    }
+
+    function setupMixerControls() {
+        $("mixerVolume")?.addEventListener(
+            "input",
+            updateMasterVolume
+        );
+
+        $("muteBtn")?.addEventListener(
+            "click",
+            () => {
+                state.masterMuted = !state.masterMuted;
+
+                if (state.masterMuteGain && state.audioContext) {
+                    state.masterMuteGain.gain.setTargetAtTime(
+                        state.masterMuted ? 0 : 1,
+                        state.audioContext.currentTime,
+                        0.02
+                    );
+                }
+
+                const button = $("muteBtn");
+
+                if (button) {
+                    button.textContent = state.masterMuted
+                        ? "Unmute Master"
+                        : "Mute Master";
+                }
+            }
+        );
+
+        $("analyzeAudioBtn")?.addEventListener(
+            "click",
+            analyseActiveAudio
+        );
+
+        $("mixerTrackVolume")?.addEventListener(
+            "input",
+            (event) => {
+                const track = getActiveTrack();
+
+                if (!track) {
+                    return;
+                }
+
+                track.volume = clamp(
+                    Number(event.target.value) / 100,
+                    0,
+                    1.5
+                );
+
+                applyTrackEffects(track);
+            }
+        );
+
+        $("mixerPan")?.addEventListener(
+            "input",
+            (event) => {
+                const track = getActiveTrack();
+
+                if (!track) {
+                    return;
+                }
+
+                track.pan = clamp(
+                    Number(event.target.value) / 100,
+                    -1,
+                    1
+                );
+
+                applyTrackEffects(track);
+            }
+        );
+
+        $("voiceVolume")?.addEventListener(
+            "input",
+            (event) => {
+                const track = state.tracks.find(
+                    (item) => item.type === "voice"
+                );
+
+                if (!track) {
+                    return;
+                }
+
+                track.volume = Number(event.target.value) / 100;
+                applyTrackEffects(track);
+            }
+        );
+
+        $("voicePan")?.addEventListener(
+            "input",
+            (event) => {
+                const track = state.tracks.find(
+                    (item) => item.type === "voice"
+                );
+
+                if (!track) {
+                    return;
+                }
+
+                track.pan = Number(event.target.value) / 100;
+                applyTrackEffects(track);
+            }
+        );
+
+        $("instrumentMixerVolume")?.addEventListener(
+            "input",
+            (event) => {
+                const track = state.tracks.find(
+                    (item) => item.type === "keyboard"
+                );
+
+                if (!track) {
+                    return;
+                }
+
+                track.volume =
+                    Number(event.target.value) / 100;
+
+                applyTrackEffects(track);
+            }
+        );
+
+        $("instrumentMixerPan")?.addEventListener(
+            "input",
+            (event) => {
+                const track = state.tracks.find(
+                    (item) => item.type === "keyboard"
+                );
+
+                if (!track) {
+                    return;
+                }
+
+                track.pan =
+                    Number(event.target.value) / 100;
+
+                applyTrackEffects(track);
+            }
+        );
+    }
+
+    function setupExportControls() {
+        $("exportBtn")?.addEventListener(
+            "click",
+            exportAudio
+        );
+
+        $("downloadExportBtn")?.addEventListener(
+            "click",
+            downloadExport
+        );
+
+        [
+            "exportFormat",
+            "exportQuality",
+            "exportSampleRate",
+            "exportChannels",
+            "exportSource",
+            "normalizeExport"
+        ].forEach((id) => {
+            $(id)?.addEventListener(
+                "change",
+                updateExportSummary
+            );
+        });
+    }
+
+    function setupProjectControls() {
+        $("saveProjectBtn")?.addEventListener(
+            "click",
+            saveProjectState
+        );
+
+        $("backupProjectBtn")?.addEventListener(
+            "click",
+            backupProject
+        );
+
+        $("restoreProjectInput")?.addEventListener(
+            "change",
+            (event) => {
+                restoreProjectFile(
+                    event.target.files?.[0]
+                );
+
+                event.target.value = "";
+            }
+        );
+
+        $("undoBtn")?.addEventListener(
+            "click",
+            undo
+        );
+
+        $("redoBtn")?.addEventListener(
+            "click",
+            redo
+        );
+
+        $("projectName")?.addEventListener(
+            "input",
+            (event) => {
+                state.projectName = event.target.value;
+
+                safeText(
+                    $("projectState"),
+                    "Unsaved changes"
+                );
+            }
+        );
+    }
+
+    /* =====================================================
+       19. KEYBOARD SHORTCUTS
+       ===================================================== */
+
+    function setupKeyboardShortcuts() {
+        document.addEventListener("keydown", (event) => {
+            const target = event.target;
+
+            if (
+                target instanceof HTMLInputElement ||
+                target instanceof HTMLTextAreaElement ||
+                target instanceof HTMLSelectElement ||
+                target?.isContentEditable
+            ) {
+                return;
+            }
+
+            if (event.code === "Space") {
+                event.preventDefault();
+                togglePlayback();
+            }
+
+            if (
+                (event.ctrlKey || event.metaKey) &&
+                event.key.toLowerCase() === "s"
+            ) {
+                event.preventDefault();
+                saveProjectState();
+            }
+
+            if (
+                (event.ctrlKey || event.metaKey) &&
+                event.key.toLowerCase() === "z"
+            ) {
+                event.preventDefault();
+                undo();
+            }
+
+            if (
+                (event.ctrlKey || event.metaKey) &&
+                event.key.toLowerCase() === "y"
+            ) {
+                event.preventDefault();
+                redo();
+            }
+
+            if (event.key === "Escape") {
+                stopPlayback();
+            }
+        });
+    }
+
+    /* =====================================================
+       20. APP INITIALIZATION
+       ===================================================== */
+
+    function initializeButtonStates() {
+        setButtonEnabled("pauseRecordBtn", false);
+        setButtonEnabled("resumeRecordBtn", false);
+        setButtonEnabled("stopRecordBtn", false);
+
+        setButtonEnabled("pauseKeyboardBtn", false);
+        setButtonEnabled("resumeKeyboardBtn", false);
+        setButtonEnabled("stopKeyboardBtn", false);
+
+        setButtonEnabled("downloadExportBtn", false);
+        setButtonEnabled("undoBtn", false);
+        setButtonEnabled("redoBtn", false);
+
+        const result = $("recordingResult");
+
+        if (result) {
+            result.hidden = true;
+        }
+
+        safeText($("recordingTimer"), "00:00.00");
+        safeText($("timeDisplay"), "00:00.00");
+        safeText($("durationDisplay"), "00:00.00");
+
+        safeText($("engineStatus"), "Audio engine ready");
+        safeText($("engineFooterStatus"), "Ready");
+        safeText($("audioStatus"), "Ready");
+    }
+
+    function initializeApp() {
+        initializeButtonStates();
+
+        setupNavigation();
+        setupDropZone();
+        setupTrackActions();
+        setupControlListeners();
+        setupPlaybackControls();
+        setupVoiceControls();
+        setupKeyboardControls();
+        setupMixerControls();
+        setupExportControls();
+        setupProjectControls();
+        setupKeyboardShortcuts();
+
+        buildKeyboard();
+        renderTrackList();
+        renderTimeline();
         updateExportSummary();
-      });
-    });
-  }
 
-  /* -------------------------------------------------------
-     VISIBILITY / RESIZE
-     ------------------------------------------------------- */
+        const canvas = $("recordingWaveform");
 
-  function bindResize() {
-    let resizeTimer;
+        if (canvas) {
+            drawWaveform(canvas, null);
+        }
 
-    window.addEventListener("resize", () => {
-      clearTimeout(resizeTimer);
+        window.addEventListener("resize", () => {
+            renderTimeline();
+        });
 
-      resizeTimer = setTimeout(() => {
-        drawAllWaveforms();
-        updateTimeline();
-      }, 120);
-    });
-  }
+        window.addEventListener("beforeunload", () => {
+            if (state.mediaStream) {
+                state.mediaStream.getTracks().forEach(
+                    (track) => track.stop()
+                );
+            }
 
-  /* -------------------------------------------------------
-     INIT
-     ------------------------------------------------------- */
+            stopTrackSources();
 
-  function initialize() {
-    if (state.initialized) return;
+            if (state.recordingUrl) {
+                URL.revokeObjectURL(state.recordingUrl);
+            }
 
-    state.initialized = true;
+            if (state.exportUrl) {
+                URL.revokeObjectURL(state.exportUrl);
+            }
+        });
 
-    bindNavigation();
-    bindFileUpload();
-    bindTrackSelection();
-    bindTimelineSeeking();
-    bindProjectTools();
+        console.info(
+            "Naol Music Studio 3D initialized."
+        );
+    }
 
-    bindEffectControls();
-    bindButtons();
-    bindPlaybackSpeed();
-    bindSeekBar();
-    bindExportSettings();
-    bindResize();
-
-    renderVirtualKeyboard();
-    bindComputerKeyboard();
-
-    updateAudioInformation();
-    updateTimeline();
-    updatePlaybackButtons();
-
-    updateTrackMuteSoloGains();
-    updateRecordingButtons();
-    updateKeyboardRecordingButtons();
-    updateExportSummary();
-
-    saveUndoState();
-
-    setEngineStatus("Ready");
-
-    setStatus(
-      "audioStatus",
-      "Upload audio to begin"
-    );
-
-    setStatus(
-      "recordingState",
-      "Ready to record"
-    );
-
-    setStatus(
-      "keyboardStatus",
-      "Keyboard ready"
-    );
-
-    setStatus(
-      "exportStatus",
-      "Ready to export"
-    );
-
-    setSaveStatus("Ready");
-
-    console.log(
-      "Naol Music Studio 3D initialized successfully."
-    );
-  }
-
-  /* -------------------------------------------------------
-     STARTUP
-     ------------------------------------------------------- */
-
-  if (document.readyState === "loading") {
-    document.addEventListener(
-      "DOMContentLoaded",
-      initialize,
-      { once: true }
-    );
-  } else {
-    initialize();
-  }
-
+    if (document.readyState === "loading") {
+        document.addEventListener(
+            "DOMContentLoaded",
+            initializeApp,
+            { once: true }
+        );
+    } else {
+        initializeApp();
+    }
 })();
